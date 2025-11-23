@@ -1,4 +1,4 @@
-# To separate your traces from other application
-LANGSMITH_PROJECT=new-agent
-
-# Add API keys for connecting to LLM providers, data sources, and other integrations here
+langgraph>=0.2.54
+langchain-openai>=0.2.0
+langchain-core>=0.3.0
+openai>=1.40.0
