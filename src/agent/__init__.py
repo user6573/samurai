@@ -1,8 +1,5 @@
-"""New LangGraph Agent.
+# __init__.py im gleichen Paket/Ordner wie graph.py
 
-This module defines a custom graph.
-"""
+from .graph import graph, ShitstormState
 
-from agent.graph import graph
-
-__all__ = ["graph"]
+__all__ = ["graph", "ShitstormState"]
