@@ -1,419 +1,409 @@
+"""LangGraph graph definition for the Shitstorm-Simulation agent.
+
+Dieses File wird von LangGraph Server / LangGraph Cloud geladen.
+Die exportierte Variable `graph` ist der ausführbare Graph.
+"""
+
+from __future__ import annotations
+
 import os
 import json
-import random
-from typing import List, Optional, Literal, TypedDict
+from typing import Any, Dict, List, Literal, TypedDict
 
+from langgraph.graph import StateGraph, END
+from langgraph.types import interrupt
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
-from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.types import interrupt
+
+# Optional: LangSmith / LangChain Tracing deaktivieren, damit es auch ohne
+# gültigen LANGSMITH_API_KEY keine 403-Fehler gibt.
+os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
+os.environ.setdefault("LANGSMITH_TRACING", "false")
 
 
-# ------------------------------------------------------------
-# Modell / LLM
-# ------------------------------------------------------------
+class ShitstormState(TypedDict):
+    """Gesamter Zustand der Shitstorm-Simulation.
 
-MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    Dieser State wird zwischen den Nodes hin- und hergereicht und am Ende
+    als Ergebnis zurückgegeben. Alle Keys müssen JSON-serialisierbar sein.
+    """
 
-llm = ChatOpenAI(
-    model=MODEL_NAME,
-    temperature=0.7,
-)
-
-
-# ------------------------------------------------------------
-# State-Definition
-# ------------------------------------------------------------
-
-class ShitstormState(TypedDict, total=False):
     platform: str
     cause: str
-    brand: str
-
+    company_name: str
     round: int
-    intensity: int  # 0–100
-
-    last_company_response: Optional[str]
-    politeness_score: Optional[float]
-    responsibility_score: Optional[float]
-    last_quality_score: Optional[float]
-
-    comments: List[str]          # aktuelle Community-Kommentare (mit Namen/Handles im Text)
-    history: List[str]           # Log der Simulation
-
-    status: Literal["running", "user_won", "user_lost", "open"]
-    summary: str                 # finale Zusammenfassung
+    history: List[Dict[str, Any]]
+    last_company_response: str
+    last_community_comments: List[str]
+    politeness_score: float
+    responsibility_score: float
+    reaction_score: float
+    intensity: float
+    status: Literal["running", "user_won", "user_lost"]
+    summary: str
 
 
-# ------------------------------------------------------------
-# Hilfsfunktionen
-# ------------------------------------------------------------
+def _safe_load_json(text: str):
+    """Versuche, robust JSON aus einem LLM-Output zu laden."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = text[start : end + 1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                return None
+        # Evtl. reine Liste ohne geschweifte Klammern
+        start = text.find("[")
+        end = text.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            candidate = text[start : end + 1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                return None
+        return None
 
-def _clamp_intensity(value: float) -> int:
-    return max(0, min(100, int(round(value))))
+
+def _make_llm() -> ChatOpenAI:
+    """Erzeuge das LLM für die Simulation.
+
+    Das Modell kann über die Umgebungsvariable OPENAI_MODEL überschrieben werden.
+    """
+    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    # OPENAI_API_KEY kommt ebenfalls aus der Umgebung (.env im Projekt).
+    return ChatOpenAI(model=model_name, temperature=0.3)
 
 
-def _split_lines(text: str) -> List[str]:
-    return [line.strip() for line in text.splitlines() if line.strip()]
+def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
+    """Generiert Community-Kommentare für die aktuelle Runde."""
+    state["round"] += 1
+    round_num = state["round"]
 
+    platform = state["platform"]
+    cause = state["cause"]
+    company_name = state["company_name"]
+    intensity = state["intensity"]
+    last_answer = state["last_company_response"]
+    reaction_score = state["reaction_score"]
 
-# ------------------------------------------------------------
-# Nodes
-# ------------------------------------------------------------
+    if round_num == 1:
+        situation_desc = "Dies sind die ersten Reaktionen der Community auf den Auslöser."
+    else:
+        if reaction_score >= 65:
+            situation_desc = (
+                "Die letzte Antwort des Unternehmens wurde überwiegend positiv aufgenommen."
+            )
+        elif reaction_score >= 45:
+            situation_desc = (
+                "Die letzte Antwort des Unternehmens war gemischt und hat die Lage nur leicht beruhigt."
+            )
+        else:
+            situation_desc = (
+                "Die letzte Antwort des Unternehmens kam schlecht an und hat die Community eher verärgert."
+            )
 
-def init_shitstorm(state: ShitstormState) -> ShitstormState:
-    """Startzustand: Plattform, Ursache, Marke + erste Community-Kommentare."""
-    platform = state.get("platform") or "Instagram"
-    cause = state.get("cause") or "Produktfehler"
-    brand = state.get("brand") or "Beispiel GmbH"
-    intensity = state.get("intensity", 65)
-
-    sys = SystemMessage(
+    system_msg = SystemMessage(
         content=(
-            "Du bist eine wütende Social-Media-Community. "
-            "Du schreibst authentische Kommentare im Stil der gewählten Plattform. "
-            "Jeder Kommentar soll so aussehen: 'Name (@handle): kurzer Kommentar'. "
-            "Keine Aufzählungszeichen, keine zusätzlichen Erklärungen."
+            "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
+            "Schreibe auf Deutsch, im typischen Ton der jeweiligen Plattform.\n"
+            "Erzeuge realistische, aber nicht beleidigende Kommentare.\n"
+            "Antwort NUR als JSON-Liste von Strings, z.B.:\n"
+            '["Kommentar 1", "Kommentar 2", "..."]\n'
+            "Kein zusätzlicher Text, keine Erklärungen."
         )
     )
 
-    user = HumanMessage(
+    human_msg = HumanMessage(
         content=(
             f"Plattform: {platform}\n"
-            f"Unternehmen: {brand}\n"
-            f"Ursache des Shitstorms: {cause}\n\n"
-            "Erzeuge 5 kurze, emotionale Kommentare der Community.\n"
-            "Format: eine Zeile pro Kommentar wie 'Name (@handle): Kommentar'."
+            f"Unternehmen: {company_name}\n"
+            f"Ursache des Shitstorms: {cause}\n"
+            f"Aktuelle Shitstorm-Intensität (0-100): {intensity}\n"
+            f"Runde: {round_num}\n"
+            f"Situation: {situation_desc}\n"
+            f"Letzte Antwort des Unternehmens:\n{last_answer or '(noch keine)'}\n\n"
+            "Generiere 3 bis 6 kurze Kommentare der Community. "
+            "Mische sachliche Kritik und emotionale Reaktionen. "
+            "Es darf hart, aber nicht beleidigend oder diskriminierend sein."
         )
     )
 
-    resp = llm.invoke([sys, user])
-    comments = _split_lines(resp.content)
+    result = llm.invoke([system_msg, human_msg])
+    comments = _safe_load_json(result.content) or []
 
-    history = state.get("history") or []
-    history.append(
-        f"Runde 1 gestartet. Plattform: {platform}, Ursache: {cause}, "
-        f"Start-Intensität: {intensity}/100."
-    )
-    history.append("Erste Community-Kommentare generiert.")
+    if not isinstance(comments, list) or not comments:
+        # Fallback: Zeilenweise interpretieren
+        lines = [ln.strip("- ").strip() for ln in result.content.splitlines() if ln.strip()]
+        comments = lines[:5] or [
+            "Ich bin echt sauer über diese Situation.",
+            "So kann ein Unternehmen nicht mit seinen Kund:innen umgehen.",
+        ]
 
-    return {
-        "platform": platform,
-        "cause": cause,
-        "brand": brand,
-        "round": 1,
-        "intensity": intensity,
-        "comments": comments,
-        "history": history,
-        "status": "running",
+    comments = [str(c) for c in comments]
+
+    state["last_community_comments"] = comments
+    for c in comments:
+        state["history"].append(
+            {
+                "actor": "community",
+                "round": round_num,
+                "content": c,
+            }
+        )
+
+    return state
+
+
+def company_response_node(state: ShitstormState) -> ShitstormState:
+    """Human-in-the-loop Node für die Unternehmensantwort.
+
+    Statt input() in der CLI benutzen wir LangGraph `interrupt`, damit
+    LangGraph Server / Cloud die Ausführung pausieren und von außen
+    mit einer Antwort wieder aufgenommen werden kann.
+
+    Erwartet wird, dass beim Resume ein String oder ein Dict wie
+    {"text": "..."} zurückkommt.
+    """
+    prompt_payload: Dict[str, Any] = {
+        "type": "company_response_request",
+        "round": state["round"],
+        "platform": state["platform"],
+        "cause": state["cause"],
+        "company_name": state["company_name"],
+        "intensity": state["intensity"],
+        "last_community_comments": state["last_community_comments"],
+        "hint": (
+            "Formuliere eine öffentliche Antwort des Unternehmens. "
+            "Sei höflich, übernimm Verantwortung und biete konkrete Schritte an."
+        ),
     }
 
+    resume_value = interrupt(prompt_payload)
 
-def wait_for_company_response(state: ShitstormState) -> ShitstormState:
-    """
-    Human-in-the-loop: Hier pausiert die Ausführung mit `interrupt`
-    und wartet auf den Social-Media-Post des Unternehmens.
-    """
-    round_no = state.get("round", 1)
-    intensity = state.get("intensity", 50)
-    comments = state.get("comments", [])
+    if isinstance(resume_value, dict):
+        answer = str(resume_value.get("text", "")).strip()
+    else:
+        answer = str(resume_value or "").strip()
 
-    preview_comments = "\n".join(comments[:5]) or "(noch keine Kommentare)"
+    if not answer:
+        # Keine neue Antwort – Status unverändert lassen
+        return state
 
-    prompt_text = (
-        f"Runde {round_no} – aktuelle Shitstorm-Intensität: {intensity}/100.\n\n"
-        "Aktuelle Community-Kommentare (Auszug):\n"
-        f"{preview_comments}\n\n"
-        "Schreibe jetzt deinen Social-Media-Post als Unternehmen, "
-        "um den Shitstorm abzuschwächen oder zu beenden."
-    )
-
-    # In LangGraph Studio / per API bekommst du dieses Objekt zurück.
-    # Zum Fortsetzen musst du den Text (die Unternehmensantwort) als resume-Wert schicken.
-    response_from_human = interrupt(
+    state["last_company_response"] = answer
+    state["history"].append(
         {
-            "type": "company_response",
-            "round": round_no,
-            "intensity": intensity,
-            "message": prompt_text,
+            "actor": "company",
+            "round": state["round"],
+            "content": answer,
         }
     )
-
-    # Beim Resumen wird das der Rückgabewert von interrupt()
-    if isinstance(response_from_human, dict) and "text" in response_from_human:
-        company_response = str(response_from_human["text"])
-    else:
-        company_response = str(response_from_human)
-
-    history = state.get("history") or []
-    history.append(f"Runde {round_no}: Unternehmensreaktion gepostet:\n{company_response}")
-
-    return {
-        "last_company_response": company_response,
-        "history": history,
-    }
+    return state
 
 
-def evaluate_response(state: ShitstormState) -> ShitstormState:
-    """Bewertet die Antwort anhand von folgenden Kriterien(0–100): 
-    Authentisch
-    Professionell
-    Verifiziert und transparent
-    Positiv & lösungsorintiert
-    Ganzheitlich & einheitlich
-    ."""
-    company_response = state.get("last_company_response") or ""
-    platform = state.get("platform", "Social Media")
-    cause = state.get("cause", "")
-    comments_preview = "\n".join(state.get("comments", [])[:5])
+def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
+    """Bewertet die Unternehmensantwort nach Höflichkeit und Verantwortung."""
+    platform = state["platform"]
+    cause = state["cause"]
+    company_name = state["company_name"]
+    answer = state["last_company_response"]
 
-    sys = SystemMessage(
+    system_msg = SystemMessage(
         content=(
-            "Du bist Expert:in für Krisenkommunikation und bewertest Antworten von Unternehmen "
-            "auf Shitstorms. Antworte NUR mit gültigem JSON."
+            "Du bist ein professioneller Coach für Krisenkommunikation in sozialen Medien.\n"
+            "Bewerte Antworten von Unternehmen in Shitstorms nach klaren Kriterien.\n"
+            "Du antwortest ausschließlich als JSON-Objekt und gibst keine Erklärungen außerhalb von JSON."
         )
     )
-    user = HumanMessage(
+
+    human_msg = HumanMessage(
         content=(
-            f"Bewerte die folgende Antwort eines Unternehmens auf einen Shitstorm.\n\n"
+            "Bewerte die folgende Antwort eines Unternehmens in einem Shitstorm.\n\n"
             f"Plattform: {platform}\n"
+            f"Unternehmen: {company_name}\n"
             f"Ursache des Shitstorms: {cause}\n\n"
-            f"Aktuelle Community-Kommentare (Auszug):\n{comments_preview}\n\n"
-            "Antwort des Unternehmens:\n"
-            f"\"\"\"{company_response}\"\"\"\n\n"
-            "Bewerte auf einer Skala von 0 bis 100:\n"
-            "- politeness: Wie höflich/respektvoll/ruhig ist die Antwort?\n"
-            "- responsibility: Wie klar übernimmt das Unternehmen Verantwortung, "
-            "zeigt Einsicht und bietet Lösungen?\n\n"
-            "Gib die Antwort ausschließlich als JSON in diesem Format zurück:\n"
+            f"Antwort des Unternehmens:\n\"\"\"{answer}\"\"\"\n\n"
+            "Kriterien (0–100):\n"
+            "- politeness: Höflichkeit, respektvoller Ton, Empathie, keine Angriffe.\n"
+            "- responsibility: Verantwortungsübernahme, klare Benennung eigener Fehler, Entschuldigung, glaubwürdige Maßnahmen.\n"
+            "- overall: Gesamteindruck, wie gut die Antwort zur Deeskalation beiträgt.\n\n"
+            "Gib deine Antwort NUR als gültiges JSON im folgenden Format zurück:\n"
             "{\n"
-            '  "politeness": <Zahl 0-100>,\n'
-            '  "responsibility": <Zahl 0-100>,\n'
-            '  "short_feedback": "<sehr kurze deutsche Text-Zusammenfassung>"\n'
+            '  \"politeness\": <Zahl 0-100>,\n'
+            '  \"responsibility\": <Zahl 0-100>,\n'
+            '  \"overall\": <Zahl 0-100>,\n'
+            '  \"feedback\": \"Kurzes Feedback für die Nutzerin / den Nutzer\"\n'
             "}\n"
         )
     )
 
-    resp = llm.invoke([sys, user])
-    text = resp.content
+    result = llm.invoke([system_msg, human_msg])
+    data = _safe_load_json(result.content) or {}
 
-    try:
-        data = json.loads(text)
-        politeness = float(data.get("politeness", 0))
-        responsibility = float(data.get("responsibility", 0))
-        feedback = str(data.get("short_feedback", "")).strip()
-    except Exception:
-        politeness = 0.0
-        responsibility = 0.0
-        feedback = "Fehler beim Parsen der Bewertung – Scores auf 0 gesetzt."
+    def clamp_score(v: Any, default: float = 50.0) -> float:
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            x = default
+        return max(0.0, min(100.0, x))
 
-    quality = (politeness + responsibility) / 2.0
+    politeness = clamp_score(data.get("politeness"))
+    responsibility = clamp_score(data.get("responsibility"))
+    overall = clamp_score(data.get("overall", (politeness + responsibility) / 2.0))
 
-    history = state.get("history") or []
-    history.append(
-        f"Bewertung Runde {state.get('round', 1)} – "
-        f"Höflichkeit: {politeness:.1f}, Verantwortung: {responsibility:.1f}, "
-        f"Gesamtscore: {quality:.1f}. Feedback: {feedback}"
+    feedback = data.get("feedback") or "Keine detaillierte Rückmeldung verfügbar."
+
+    state["politeness_score"] = politeness
+    state["responsibility_score"] = responsibility
+    state["reaction_score"] = overall
+
+    state["history"].append(
+        {
+            "actor": "coach",
+            "round": state["round"],
+            "content": (
+                f"Politeness={politeness:.1f}, Responsibility={responsibility:.1f}, "
+                f"Overall={overall:.1f}. Feedback: {feedback}"
+            ),
+        }
     )
 
-    return {
-        "politeness_score": politeness,
-        "responsibility_score": responsibility,
-        "last_quality_score": quality,
-        "history": history,
-    }
+    return state
 
 
 def update_intensity(state: ShitstormState) -> ShitstormState:
-    """Passt die Shitstorm-Intensität basierend auf dem Qualitätsscore an."""
-    intensity = state.get("intensity", 50)
-    quality = state.get("last_quality_score", 50.0) or 50.0
+    """Aktualisiert die Shitstorm-Intensität basierend auf dem Gesamtscore."""
+    prev = state["intensity"]
+    score = state["reaction_score"]
 
-    if quality >= 75:
-        delta = random.randint(-28, -18)
-        verdict = "Die Community reagiert überwiegend positiv – der Shitstorm flaut deutlich ab."
-    elif quality >= 60:
-        delta = random.randint(-18, -8)
-        verdict = "Die Reaktion kommt gut an – der Shitstorm nimmt spürbar ab."
-    elif quality >= 40:
-        delta = random.randint(-5, 5)
-        verdict = "Die Reaktion polarisiert – einige sind zufrieden, andere nicht."
-    elif quality >= 25:
-        delta = random.randint(5, 15)
-        verdict = "Viele sind unzufrieden – der Shitstorm legt wieder zu."
+    if score >= 80:
+        delta = -20.0
+    elif score >= 65:
+        delta = -12.0
+    elif score >= 50:
+        delta = -5.0
+    elif score >= 35:
+        delta = +5.0
+    elif score >= 20:
+        delta = +12.0
     else:
-        delta = random.randint(15, 25)
-        verdict = "Die Antwort gießt Öl ins Feuer – der Shitstorm eskaliert deutlich."
+        delta = +20.0
 
-    new_intensity = _clamp_intensity(intensity + delta)
+    new_intensity = max(0.0, min(100.0, prev + delta))
+    state["intensity"] = new_intensity
 
-    history = state.get("history") or []
-    history.append(
-        f"Shitstorm-Intensität verändert sich um {delta:+d} Punkte auf {new_intensity}/100. {verdict}"
-    )
-
-    return {
-        "intensity": new_intensity,
-        "history": history,
-    }
-
-
-def route_after_update(state: ShitstormState) -> Literal["community_round", "summarize"]:
-    """Router: weiter simuliern oder beenden?"""
-    intensity = state.get("intensity", 50)
-    round_no = state.get("round", 1)
-
-    # Harte Grenze auf Rundenanzahl, damit nichts unendlich läuft
-    if round_no >= 10:
-        return "summarize"
-
-    if intensity < 10 or intensity > 90:
-        return "summarize"
-
-    return "community_round"
-
-
-def community_round(state: ShitstormState) -> ShitstormState:
-    """Neue Community-Kommentare auf Basis der letzten Antwort + Intensität generieren."""
-    round_no = state.get("round", 1) + 1
-    platform = state.get("platform", "Social Media")
-    cause = state.get("cause", "")
-    brand = state.get("brand", "das Unternehmen")
-    intensity = state.get("intensity", 50)
-    quality = state.get("last_quality_score", 50.0) or 50.0
-    last_response = state.get("last_company_response") or ""
-
-    if quality >= 70:
-        tone = "freundlicher und konstruktiver"
-    elif quality >= 45:
-        tone = "gemischt – teils konstruktiv, teils kritisch"
+    if new_intensity < 10.0:
+        state["status"] = "user_won"
+    elif new_intensity > 90.0:
+        state["status"] = "user_lost"
     else:
-        tone = "härter, zynischer und wütender"
+        state["status"] = "running"
 
-    sys = SystemMessage(
+    state["history"].append(
+        {
+            "actor": "system",
+            "round": state["round"],
+            "content": f"Intensität von {prev:.1f} auf {new_intensity:.1f} geändert (Score={score:.1f}).",
+        }
+    )
+
+    return state
+
+
+def route_after_update(state: ShitstormState) -> str:
+    """Bestimmt, ob weiter simuliert oder beendet wird."""
+    if state["status"] == "running":
+        return "continue"
+    return "end"
+
+
+def summarize(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
+    """Erzeugt eine kurze Zusammenfassung des Verlaufs."""
+    outcome = {
+        "user_won": "Der Shitstorm ist weitgehend abgeklungen.",
+        "user_lost": "Der Shitstorm ist außer Kontrolle geraten.",
+        "running": "Die Simulation wurde vorzeitig beendet.",
+    }[state["status"]]
+
+    history_lines: List[str] = []
+    for h in state["history"]:
+        actor = h.get("actor", "?")
+        rnd = h.get("round", 0)
+        content = h.get("content", "")
+        if len(content) > 400:
+            content = content[:400] + " [...]"
+        history_lines.append(f"Runde {rnd} - {actor}: {content}")
+
+    history_text = "\n".join(history_lines[-60:])
+
+    system_msg = SystemMessage(
         content=(
-            "Du bist die Social-Media-Community und reagierst auf die Krisenkommunikation "
-            "eines Unternehmens. Du schreibst authentische Kommentare mit Namen und Handles.\n"
-            "Format: 'Name (@handle): Kommentar', eine Zeile pro Kommentar. "
-            "Keine Aufzählungszeichen, keine extra Erklärungen."
+            "Du bist ein Coach für Krisenkommunikation und sollst eine Trainingssimulation auswerten.\n"
+            "Fasse den Verlauf des Shitstorms und das Verhalten des Users zusammen.\n"
+            "Gib konkrete Lernpunkte und Verbesserungsvorschläge.\n"
+            "Antwort auf Deutsch, in 2–4 kurzen Absätzen."
         )
     )
 
-    user = HumanMessage(
+    human_msg = HumanMessage(
         content=(
-            f"Plattform: {platform}\n"
-            f"Unternehmen: {brand}\n"
-            f"Ursache des Shitstorms: {cause}\n"
-            f"Aktuelle Shitstorm-Intensität: {intensity}/100\n\n"
-            f"Letzte Unternehmensreaktion:\n\"\"\"{last_response}\"\"\"\n\n"
-            f"Erzeuge 4 neue Community-Kommentare, die {tone} sind.\n"
-            "Format: eine Zeile pro Kommentar wie 'Name (@handle): Kommentar'."
+            f"Ausgangssituation: Shitstorm auf {state['platform']} wegen \"{state['cause']}\".\n"
+            f"Unternehmen: {state['company_name']}\n"
+            f"Endgültige Shitstorm-Intensität: {state['intensity']:.1f} / 100\n"
+            f"Ergebnis: {outcome}\n\n"
+            "Ausschnitte aus dem Verlauf:\n"
+            f"{history_text}"
         )
     )
 
-    resp = llm.invoke([sys, user])
-    comments = _split_lines(resp.content)
+    result = llm.invoke([system_msg, human_msg])
+    summary = result.content.strip()
+    state["summary"] = summary
+    return state
 
-    history = state.get("history") or []
-    history.append(
-        f"Neue Community-Kommentare für Runde {round_no} generiert ({len(comments)} Stück)."
+
+def build_graph():
+    """Erzeugt den ausführbaren LangGraph-Workflow für die Simulation."""
+    llm = _make_llm()
+
+    def community_node(state: ShitstormState) -> ShitstormState:
+        return community_round(state, llm)
+
+    def evaluate_node(state: ShitstormState) -> ShitstormState:
+        return llm_evaluate(state, llm)
+
+    def summarize_node(state: ShitstormState) -> ShitstormState:
+        return summarize(state, llm)
+
+    workflow = StateGraph(ShitstormState)
+
+    workflow.add_node("community_round", community_node)
+    workflow.add_node("company_response", company_response_node)
+    workflow.add_node("evaluate", evaluate_node)
+    workflow.add_node("update_intensity", update_intensity)
+    workflow.add_node("summarize", summarize_node)
+
+    workflow.set_entry_point("community_round")
+    workflow.add_edge("community_round", "company_response")
+    workflow.add_edge("company_response", "evaluate")
+    workflow.add_edge("evaluate", "update_intensity")
+    workflow.add_conditional_edges(
+        "update_intensity",
+        route_after_update,
+        {
+            "continue": "community_round",
+            "end": "summarize",
+        },
     )
+    workflow.set_finish_point("summarize")
 
-    return {
-        "round": round_no,
-        "comments": comments,
-        "history": history,
-        "status": "running",
-    }
+    return workflow.compile(name="Shitstorm-Simulation")
 
 
-def summarize(state: ShitstormState) -> ShitstormState:
-    """Abschluss: Gewinner/Verlierer bestimmen + kurze Zusammenfassung generieren."""
-    intensity = state.get("intensity", 0)
-    platform = state.get("platform", "Social Media")
-    cause = state.get("cause", "")
-    brand = state.get("brand", "das Unternehmen")
-    rounds = state.get("round", 1)
-    history = state.get("history", [])
+# Diese Variable wird von LangGraph Server / Cloud geladen
+graph = build_graph()
 
-    if intensity < 10:
-        status: Literal["user_won", "user_lost", "open"] = "user_won"
-        outcome = "Der Shitstorm ist weitgehend abgeflaut – starke Performance."
-    elif intensity > 90:
-        status = "user_lost"
-        outcome = "Der Shitstorm ist außer Kontrolle geraten."
-    else:
-        status = "open"
-        outcome = "Die Situation ist nicht eindeutig, aber die Übung wird hier beendet."
-
-    log_excerpt = "\n".join(history[-8:])
-
-    sys = SystemMessage(
-        content=(
-            "Du bist Trainer:in für Krisenkommunikation und fasst die Übung kurz zusammen."
-        )
-    )
-    user = HumanMessage(
-        content=(
-            "Fasse die folgende Shitstorm-Simulation in 3–5 Sätzen zusammen.\n"
-            "Gehe darauf ein:\n"
-            "- wie sich die Intensität entwickelt hat,\n"
-            "- was an den Antworten gut / schlecht war,\n"
-            "- welche Learnings die Person mitnehmen sollte.\n\n"
-            f"Meta-Infos:\n"
-            f"- Plattform: {platform}\n"
-            f"- Unternehmen: {brand}\n"
-            f"- Ursache: {cause}\n"
-            f"- Finale Intensität: {intensity}/100\n"
-            f"- Runden: {rounds}\n"
-            f"- Ergebnis: {outcome}\n\n"
-            f"Verlauf (Auszug):\n\"\"\"{log_excerpt}\"\"\""
-        )
-    )
-
-    resp = llm.invoke([sys, user])
-    summary_text = resp.content.strip()
-
-    history.append(f"Finale Zusammenfassung: {summary_text}")
-
-    return {
-        "status": status,
-        "summary": summary_text,
-        "history": history,
-    }
-
-
-# ------------------------------------------------------------
-# Graph bauen & kompilieren
-# ------------------------------------------------------------
-
-builder = StateGraph(ShitstormState)
-
-builder.add_node("init_shitstorm", init_shitstorm)
-builder.add_node("wait_for_response", wait_for_company_response)
-builder.add_node("evaluate_response", evaluate_response)
-builder.add_node("update_intensity", update_intensity)
-builder.add_node("community_round", community_round)
-builder.add_node("summarize", summarize)
-
-builder.add_edge(START, "init_shitstorm")
-builder.add_edge("init_shitstorm", "wait_for_response")
-builder.add_edge("wait_for_response", "evaluate_response")
-builder.add_edge("evaluate_response", "update_intensity")
-
-builder.add_conditional_edges(
-    "update_intensity",
-    route_after_update,
-    {
-        "community_round": "community_round",
-        "summarize": "summarize",
-    },
-)
-
-builder.add_edge("community_round", "wait_for_response")
-builder.add_edge("summarize", END)
-
-# Für Interrupts wird ein Checkpointer benötigt.
-memory = InMemorySaver()
-graph = builder.compile(checkpointer=memory)
+__all__ = ["graph", "ShitstormState"]
