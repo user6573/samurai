@@ -80,6 +80,7 @@ def _make_llm() -> ChatOpenAI:
 
 def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     """Generiert Community-Kommentare für die aktuelle Runde."""
+
     state["round"] += 1
     round_num = state["round"]
 
@@ -90,6 +91,13 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     last_answer = state["last_company_response"]
     reaction_score = state["reaction_score"]
 
+    # Erkennen, ob wir im X/Twitter-Interface sind
+    is_x = False
+    if isinstance(platform, str):
+        pl = platform.lower()
+        is_x = pl.startswith("x") or "twitter" in pl
+
+    # Beschreibung der Situation im Verlauf
     if round_num == 1:
         situation_desc = "Dies sind die ersten Reaktionen der Community auf den Auslöser."
     else:
@@ -106,16 +114,60 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
                 "Die letzte Antwort des Unternehmens kam schlecht an und hat die Community eher verärgert."
             )
 
-    system_msg = SystemMessage(
-        content=(
-            "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
-            "Schreibe auf Deutsch, im typischen Ton der jeweiligen Plattform.\n"
-            "Erzeuge realistische, aber nicht beleidigende Kommentare.\n"
-            "Antwort NUR als JSON-Liste von Strings, z.B.:\n"
-            '["Kommentar 1", "Kommentar 2", "..."]\n'
-            "Kein zusätzlicher Text, keine Erklärungen."
-        )
+    # Welcher Post hängt direkt über den Kommentaren?
+    if round_num == 1:
+        target_post_type = "Beschwerde-Post einer Nutzerin / eines Nutzers"
+        target_post_text = cause
+    else:
+        target_post_type = "öffentliche Antwort des Unternehmens"
+        # Fallback: falls keine Antwort gesetzt, trotzdem auf Ursache beziehen
+        target_post_text = last_answer or cause
+
+    # Kurzer Auszug aus der bisherigen History, damit die Replies konsistenter werden
+    recent_events: List[str] = []
+    for h in state.get("history", [])[-6:]:
+        actor = h.get("actor", "?")
+        content = str(h.get("content", ""))
+        if len(content) > 160:
+            content = content[:160] + "…"
+        recent_events.append(f"- {actor}: {content}")
+    recent_text = "\n".join(recent_events) if recent_events else "noch keine relevanten Einträge"
+
+    # Grund-Prompt
+    system_content = (
+        "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
+        "Schreibe auf Deutsch, im typischen Ton der jeweiligen Plattform.\n"
+        "Erzeuge realistische, aber nicht beleidigende Kommentare.\n"
+        "Du schreibst NUR Community-Kommentare, NIEMALS die Antwort des Unternehmens.\n"
+        "Jeder Kommentar ist eine einzelne, eigenständige Antwort (kein Dialog, keine langen Threads).\n"
+        "Antwort NUR als JSON-Liste von Strings, z.B.:\n"
+        '  [\"Kommentar 1\", \"Kommentar 2\", \"...\"]\n'
+        "Kein zusätzlicher Text, keine Erklärungen, keine JSON-Objekte.\n"
+        "Achte auf Varianz: Mindestens eine starke Kritik, eine sachlich-konstruktive Stimme "
+        "und optional eine Stimme, die das Unternehmen teilweise verteidigt.\n"
+        "SEHR WICHTIG:\n"
+        "- Die Kommentare stehen direkt unter EINEM konkreten Post.\n"
+        "- Der Hauptpunkt jedes Kommentars muss sich klar auf GENAU diesen Post beziehen "
+        "(Inhalt, Ton, Versprechen oder Lücken dieses Posts).\n"
+        "- Schreibe KEINE völlig allgemeinen Aussagen über das Unternehmen, sondern reagiere "
+        "auf das, was in diesem Post steht oder NICHT steht.\n"
     )
+
+    # Spezieller Stil, wenn wir im X-Interface sind
+    if is_x:
+        system_content += (
+            "\nSpezifisch für die Plattform X/Twitter:\n"
+            "- Du simulierst die „Antworten“-Sektion unter einem Post.\n"
+            "- Schreibe kurze, pointierte Kommentare (max. ca. 200 Zeichen).\n"
+            "- Ton: wie typische X-Replies – direkt, emotional, manchmal sarkastisch, aber nicht beleidigend.\n"
+            "- Du kannst gelegentlich Emojis oder Ironie nutzen, aber übertreibe nicht.\n"
+            "- Keine @Handles oder Namen im Kommentartext, die UI zeigt Namen/Handles separat.\n"
+            "- Keine Hashtags-Spam, maximal 0–2 Hashtags pro Kommentar.\n"
+            "- Jeder Kommentar soll deutlich machen, dass er sich auf GENAU diesen Post bezieht "
+            "(z.B. durch Formulierungen wie „diese Antwort“, „das hier“, „euer Statement oben“ usw.).\n"
+        )
+
+    system_msg = SystemMessage(content=system_content)
 
     human_msg = HumanMessage(
         content=(
@@ -124,10 +176,17 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             f"Ursache des Shitstorms: {cause}\n"
             f"Aktuelle Shitstorm-Intensität (0-100): {intensity}\n"
             f"Runde: {round_num}\n"
-            f"Situation: {situation_desc}\n"
-            f"Letzte Antwort des Unternehmens:\n{last_answer or '(noch keine)'}\n\n"
-            "Generiere 3 bis 6 kurze Kommentare der Community. "
-            "Mische sachliche Kritik und emotionale Reaktionen. "
+            f"Situation: {situation_desc}\n\n"
+            "Der folgende Post steht direkt über der Kommentarspalte, die du simulierst:\n"
+            f"Art des Posts: {target_post_type}\n"
+            f"Post-Inhalt:\n\"\"\"{target_post_text}\"\"\"\n\n"
+            "Relevante Ausschnitte aus dem bisherigen Verlauf:\n"
+            f"{recent_text}\n\n"
+            "Generiere 3 bis 6 kurze Kommentare der Community, die sich klar und hauptsächlich "
+            "auf diesen einen Post beziehen. Mische:\n"
+            "- mindestens eine klare, auch emotionale Kritik\n"
+            "- mindestens einen sachlich-konstruktiven Kommentar\n"
+            "- optional einen Kommentar, der das Unternehmen teilweise verteidigt\n"
             "Es darf hart, aber nicht beleidigend oder diskriminierend sein."
         )
     )
@@ -147,13 +206,16 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
 
     state["last_community_comments"] = comments
     for c in comments:
-        state["history"].append(
-            {
-                "actor": "community",
-                "round": round_num,
-                "content": c,
-            }
-        )
+        entry: Dict[str, Any] = {
+            "actor": "community",
+            "round": round_num,
+            "content": c,
+        }
+        # Meta-Flag, damit man im Verlauf später erkennen kann,
+        # dass diese Kommentare als X-Replies gedacht waren.
+        if is_x:
+            entry["section"] = "x_replies"
+        state["history"].append(entry)
 
     return state
 
