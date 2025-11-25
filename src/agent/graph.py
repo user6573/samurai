@@ -43,6 +43,9 @@ class ShitstormState(TypedDict):
     summary: str
 
 
+TIMEOUT_MARKER_PREFIX = "[AUTOMATISCHE COMMUNITY-REAKTION"
+
+
 def _safe_load_json(text: str):
     """Versuche, robust JSON aus einem LLM-Output zu laden."""
     try:
@@ -114,14 +117,61 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
                 "Die letzte Antwort des Unternehmens kam schlecht an und hat die Community eher verärgert."
             )
 
-    # Welcher Post hängt direkt über den Kommentaren?
-    if round_num == 1:
-        target_post_type = "Beschwerde-Post einer Nutzerin / eines Nutzers"
-        target_post_text = cause
+    # --- Timeout-Analyse: wurde die Ausführung wegen abgelaufener Reaktionszeit fortgesetzt? ---
+    company_events = [
+        h for h in state.get("history", []) if h.get("actor") == "company"
+    ]
+
+    last_is_timeout = False
+    if company_events:
+        last_content = str(company_events[-1].get("content", ""))
+        last_is_timeout = last_content.startswith(TIMEOUT_MARKER_PREFIX)
+
+    had_real_company_response_before = any(
+        isinstance(ev.get("content"), str)
+        and not str(ev.get("content")).startswith(TIMEOUT_MARKER_PREFIX)
+        for ev in company_events[:-1]
+    )
+
+    timeout_mode: Literal["no_response", "after_response", "none"]
+    if last_is_timeout and not had_real_company_response_before:
+        # Noch nie eine echte Unternehmensantwort -> Community beschwert sich über Schweigen
+        timeout_mode = "no_response"
+    elif last_is_timeout and had_real_company_response_before:
+        # Es gab schon mind. eine echte Antwort -> Community fragt sich, ob das alles war
+        timeout_mode = "after_response"
     else:
-        target_post_type = "öffentliche Antwort des Unternehmens"
-        # Fallback: falls keine Antwort gesetzt, trotzdem auf Ursache beziehen
-        target_post_text = last_answer or cause
+        timeout_mode = "none"
+
+    # Welcher Post hängt direkt über den Kommentaren?
+    if timeout_mode == "no_response":
+        target_post_type = (
+            "Beschwerde-Post einer Nutzerin / eines Nutzers "
+            "(das Unternehmen hat bisher nicht öffentlich reagiert)"
+        )
+        target_post_text = cause
+    elif timeout_mode == "after_response":
+        # Letzte echte Unternehmensantwort aus der History suchen
+        real_company_answer = None
+        for ev in reversed(company_events):
+            txt = str(ev.get("content", ""))
+            if not txt.startswith(TIMEOUT_MARKER_PREFIX):
+                real_company_answer = txt
+                break
+
+        target_post_type = (
+            "öffentliche Antwort des Unternehmens "
+            "(Community wartet auf weitere konkrete Reaktionen)"
+        )
+        target_post_text = real_company_answer or last_answer or cause
+    else:
+        # Normalfall ohne Timeout-Fokus
+        if round_num == 1:
+            target_post_type = "Beschwerde-Post einer Nutzerin / eines Nutzers"
+            target_post_text = cause
+        else:
+            target_post_type = "öffentliche Antwort des Unternehmens"
+            target_post_text = last_answer or cause
 
     # Kurzer Auszug aus der bisherigen History, damit die Replies konsistenter werden
     recent_events: List[str] = []
@@ -169,6 +219,28 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
 
     system_msg = SystemMessage(content=system_content)
 
+    # Timeout-spezifische Zusatzinstruktionen
+    if timeout_mode == "no_response":
+        extra_timeout_instr = (
+            "\nZusätzlicher Fokus: Die Community ist frustriert, dass das Unternehmen bisher GAR NICHT "
+            "öffentlich reagiert hat. Die Kommentare kritisieren vor allem:\n"
+            "- Schweigen und Nicht-Reagieren\n"
+            "- zu lange Reaktionszeiten\n"
+            "- das Gefühl, ignoriert zu werden\n"
+            "Trotzdem: keine Beleidigungen, keine Diskriminierung.\n"
+        )
+    elif timeout_mode == "after_response":
+        extra_timeout_instr = (
+            "\nZusätzlicher Fokus: Die Community fragt sich, ob das wirklich alles war. "
+            "Die Kommentare kritisieren vor allem:\n"
+            "- dass nach dieser Antwort keine weiteren konkreten Schritte, Details oder Nachbesserungen kommen\n"
+            "- dass die Reaktion halbherzig, PR-mäßig oder zu oberflächlich wirkt\n"
+            "- dass die Verantwortung nicht wirklich übernommen wird\n"
+            "Formuliere das kritisch, gerne auch zugespitzt, aber ohne Beleidigungen oder Diskriminierung.\n"
+        )
+    else:
+        extra_timeout_instr = ""
+
     human_msg = HumanMessage(
         content=(
             f"Plattform: {platform}\n"
@@ -181,7 +253,8 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             f"Art des Posts: {target_post_type}\n"
             f"Post-Inhalt:\n\"\"\"{target_post_text}\"\"\"\n\n"
             "Relevante Ausschnitte aus dem bisherigen Verlauf:\n"
-            f"{recent_text}\n\n"
+            f"{recent_text}\n"
+            f"{extra_timeout_instr}\n"
             "Generiere 3 bis 6 kurze Kommentare der Community, die sich klar und hauptsächlich "
             "auf diesen einen Post beziehen. Mische:\n"
             "- mindestens eine klare, auch emotionale Kritik\n"
