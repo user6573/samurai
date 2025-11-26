@@ -283,7 +283,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             f"{previous_replies_text}\n"
             f"{extra_timeout_instr}\n\n"
             "Generiere 6, kritische Kommentare der Community.\n"
-            "Abhängig von der Intensität sollen entweder positive oder negative Kommentare überwiegen. Bei +10/-10 sollen bereits nur noch negative/positive Kommentare vorhanden sein\n"
+            "Abhängig von der Intensität sollen entweder stark positive oder stark negative Kommentare überwiegen. Bei +10/-10 sollen bereits nur noch negative/positive Kommentare vorhanden sein\n"
             "Du darfst Frust, Enttäuschung und Wut ausdrücken, wenn nötig mit Beleidigungen\n"
             "Jeder Kommentar muss sich klar auf den obenstehenden Post beziehen "
             "(z.B. auf fehlende Details, geschönte Aussagen, vage Formulierungen, mangelnde Verantwortung "
