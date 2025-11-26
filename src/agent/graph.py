@@ -89,7 +89,7 @@ def _make_llm() -> ChatOpenAI:
 
     Das Modell kann über die Umgebungsvariable OPENAI_MODEL überschrieben werden.
     """
-    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model_name = os.getenv("OPENAI_MODEL", "gpt-5.1")
     return ChatOpenAI(model=model_name, temperature=0.3)
 
 
@@ -218,8 +218,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         "Schreibe auf Deutsch.\n"
         "ALLE Kommentare sind hart, kritisch und klar gegen das Unternehmen gerichtet.\n"
         "Der Ton darf wütend, frustriert, verärgert und deutlich ablehnend sein,\n"
-        "aber OHNE Beleidigungen, Drohungen oder diskriminierende Sprache.\n"
-        "Keine Beschimpfungen, keine Beleidigungen von Personen oder Gruppen.\n"
+        "wenn es die Simulation realistischer macht mit Beleidigungen, Drohungen oder diskriminierende Sprache.\n"
         "Du schreibst NUR Community-Kommentare, NIEMALS die Antwort des Unternehmens.\n"
         "Jeder Kommentar ist eine einzelne, eigenständige Antwort (kein Dialog, keine langen Threads).\n"
         "Alle Kommentare beziehen sich klar auf den EINEN Post direkt darüber (Inhalt, Ton, Lücken).\n"
@@ -239,7 +238,6 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "- Du simulierst die „Antworten“-Sektion unter einem Post.\n"
             "- Schreibe kurze, pointierte, sehr direkte Kommentare (max. ca. 200 Zeichen).\n"
             "- Stil: typische X-Replies in einem Shitstorm – kritisch, fordernd, sarkastisch,\n"
-            "  misstrauisch gegenüber dem Unternehmen, aber ohne Beleidigungen.\n"
             "- Keine @Handles oder Namen im Kommentartext, die UI zeigt Namen/Handles separat.\n"
             "- Keine Hashtag-Spam, maximal 0–2 Hashtags pro Kommentar.\n"
         )
@@ -254,8 +252,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     elif timeout_mode == "after_response":
         extra_timeout_instr = (
             "\nZusätzlicher Fokus: Es gab bereits eine Unternehmensantwort, aber seitdem kommt nichts mehr.\n"
-            "- Kritisiere, dass es keine weiteren konkreten Schritte, Details oder Nachbesserungen gibt.\n"
-            "- Stelle infrage, ob das wirklich alles ist und ob das Unternehmen das Problem verstanden hat.\n"
+            "- Kommentare im Still von Ich habe mehr erwarted, für mich sind noch Punkte offen\n"
         )
     else:
         extra_timeout_instr = ""
@@ -285,9 +282,9 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "Alle bisherigen Community-Kommentare (nicht wiederholen!):\n"
             f"{previous_replies_text}\n"
             f"{extra_timeout_instr}\n\n"
-            "Generiere 3 bis 6 harte, kritische Kommentare der Community.\n"
-            "ALLE Kommentare sollen deutlich skeptisch oder ablehnend gegenüber dem Unternehmen sein.\n"
-            "Du darfst Frust, Enttäuschung und Wut ausdrücken, solange du nicht beleidigend wirst.\n"
+            "Generiere 6, kritische Kommentare der Community.\n"
+            "Abhängig von der Intensität sollen entweder positive oder negative Kommentare überwiegen. Bei +10/-10 sollen bereits nur noch negative/positive Kommentare vorhanden sein\n"
+            "Du darfst Frust, Enttäuschung und Wut ausdrücken, wenn nötig mit Beleidigungen\n"
             "Jeder Kommentar muss sich klar auf den obenstehenden Post beziehen "
             "(z.B. auf fehlende Details, geschönte Aussagen, vage Formulierungen, mangelnde Verantwortung "
             "oder schwache Lösungen).\n"
@@ -379,7 +376,7 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         content=(
             "Du bist ein professioneller Coach für Krisenkommunikation in sozialen Medien.\n"
             "Bewerte Antworten von Unternehmen in Shitstorms NUR anhand dieser vier Kriterien:\n"
-            "1) Authentisch – wirkt ehrlich, menschlich und nicht wie reine PR-Floskel.\n"
+            "1) Authentisch – wirkt ehrlich, menschlich.\n"
             "2) Professionell – Ton und Struktur sind respektvoll, klar, verständlich und angemessen.\n"
             "3) Positiv & lösungsorientiert – Fokus auf konkrete Lösungen, nächste Schritte und Verbesserung,\n"
             "   nicht auf Abwehr, Relativierung oder Ausreden.\n"
@@ -388,7 +385,7 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "Bewerte bewusst eher großzügig:\n"
             "- Ein Kriterium gilt als erfüllt (true), wenn es voll ODER überwiegend erfüllt ist,\n"
             "  auch wenn kleinere Lücken oder Schwächen vorhanden sind.\n"
-            "- Setze ein Kriterium nur dann auf false, wenn es klar nicht oder nur sehr schwach erkennbar erfüllt ist.\n"
+            "- Setze ein Kriterium nur dann auf false, wenn es klar nicht erkennbar erfüllt ist.\n"
             "- In Zweifelsfällen entscheide dich für true.\n\n"
             "Du antwortest ausschließlich als JSON-Objekt, ohne zusätzlichen Text."
         )
@@ -596,9 +593,12 @@ def summarize(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "- professionell\n"
             "- positiv & lösungsorientiert\n"
             "- ganzheitlich & einheitlich\n\n"
+            "- zeitnah\n"
             "Fasse den Verlauf des Shitstorms und das Verhalten des Users zusammen.\n"
             "Gib konkrete Lernpunkte und Verbesserungsvorschläge, strukturiert an diesen Kriterien.\n"
             "Antwort auf Deutsch, in 2–4 kurzen Absätzen."
+
+            "Gib an welche Kriterien wann erfüllt wurden
         )
     )
 
