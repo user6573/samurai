@@ -96,7 +96,6 @@ def _make_llm() -> ChatOpenAI:
 # --------------------------------------------------------------------------- #
 # Community-Runde – harte, kritische, anti-duplizierte Kommentare
 # --------------------------------------------------------------------------- #
-
 def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     """Generiert Community-Kommentare für die aktuelle Runde.
 
@@ -139,12 +138,12 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         if last_delta <= -15:
             situation_desc = (
                 "Die letzte Antwort des Unternehmens hat den Shitstorm deutlich beruhigt. "
-                "Viele nehmen wahr, dass konkrete Verantwortung übernommen wurde."
+                "Viele nehmen wahr, dass konkrete Verantwortung übernommen wurde und sich wirklich etwas bewegt."
             )
         elif last_delta <= -5:
             situation_desc = (
-                "Die letzte Antwort des Unternehmens hat die Lage etwas entspannt, "
-                "aber es gibt weiterhin offene Punkte und Kritik."
+                "Die letzte Antwort des Unternehmens hat die Lage spürbar entspannt. "
+                "Die Community erkennt Fortschritte und ernsthafte Bemühungen an."
             )
         elif last_delta < 5:
             situation_desc = (
@@ -176,6 +175,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     else:
         severity = "strong_increase"
 
+    # Ton / Mischung je nach Schweregrad
     if severity == "initial":
         tone_instruction = (
             "Die Community reagiert zum ersten Mal auf den Auslöser. "
@@ -185,6 +185,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "Erzeuge überwiegend harte, kritische Kommentare, die deutlich machen, "
             f"dass {company_name} mit der Kampagne / dem Vorfall eine Grenze überschritten hat."
         )
+        positive_mode = False
     elif severity == "strong_decrease":
         tone_instruction = (
             "Die letzte Antwort und die Maßnahmen von "
@@ -193,25 +194,26 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "und sehen eine echte Bereitschaft zur Veränderung."
         )
         comment_mix_hint = (
-            "Die folgenden Punkte sollen besonders wichtig sein und sind anderen Befehlen übergestellt: "
-            "Erzeuge überwiegend positive, dankbare und zukunftsorientierte Kommentare. "
+            "Erzeuge überwiegend leicht positive, dankbare und zukunftsorientierte Kommentare. "
             f"Die Leute bedanken sich explizit für das Statement bzw. die Klarstellung von {company_name}, "
             "loben die konkreten Schritte und blicken vorsichtig positiv in die Zukunft "
             "(z.B. Hoffnung, dass es jetzt wirklich besser wird). "
-            "Ein paar wenige Kommentare dürfen noch vorsichtig skeptisch sein, aber nicht mehr scharf angreifend."
+            "Formuliere KEINE neuen Vorwürfe und stelle NICHT grundsätzlich infrage, "
+            f"ob {company_name} es ernst meint."
         )
+        positive_mode = True
     elif severity == "mild_decrease":
         tone_instruction = (
             "Die Community erkennt Fortschritte an und nimmt das Statement von "
             f"{company_name} überwiegend positiv wahr, auch wenn noch nicht alles perfekt ist."
         )
         comment_mix_hint = (
-            "Die folgenden Punkte sollen besonders wichtig sein und sind anderen Befehlen übergestellt: "
-            "Mische überwiegend konstruktive Kommentare, die sich für die Klarstellung und die ersten Schritte "
-            f"von {company_name} bedanken, mit einigen Kommentaren, die freundlich darauf hinweisen, "
-            "dass bestimmte Punkte noch weiter präzisiert oder nachgehalten werden sollten. "
+            "Erzeuge überwiegend konstruktive Kommentare, die sich für die Klarstellung und die ersten Schritte "
+            f"von {company_name} bedanken. Einige Kommentare dürfen freundlich darauf hinweisen, "
+            "dass bestimmte Punkte weiter beobachtet oder nachgehalten werden sollten. "
             "Die Grundstimmung ist: ‚Danke, guter Anfang, bitte dranbleiben.‘"
         )
+        positive_mode = True
     elif severity == "neutral":
         tone_instruction = (
             "Die letzte Antwort hat kaum etwas verändert. Die Stimmung ist gemischt."
@@ -220,6 +222,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "Erzeuge eine Mischung aus nüchtern-kritischen, skeptischen und wenigen neutralen Kommentaren. "
             "Es gibt weder klare Entspannung noch massive Verschärfung."
         )
+        positive_mode = False
     elif severity == "mild_increase":
         tone_instruction = (
             "Die Community ist eher noch kritischer geworden. Die Antwort wirkt vielen zu schwach."
@@ -228,15 +231,17 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "Erzeuge überwiegend harte, kritische Kommentare, die deutlich machen, "
             f"dass {company_name} noch zu wenig Verantwortung übernimmt oder zu vage bleibt."
         )
+        positive_mode = False
     else:  # strong_increase
         tone_instruction = (
             "Die letzte Antwort hat großen Frust ausgelöst. Die Community fühlt sich nicht ernst genommen."
         )
         comment_mix_hint = (
             "Erzeuge sehr scharfe, deutlich ablehnende Kommentare, die großes Misstrauen "
-            f"gegenüber {company_name} ausdrücken. Bleibe dabei deutlich, aber ohne Beleidigungen, "
-            "Drohungen oder diskriminierende Sprache."
+            f"gegenüber {company_name} ausdrücken. Die Formulierungen dürfen sehr hart und sarkastisch sein, "
+            "aber ohne Gewaltaufrufe und ohne diskriminierende oder hasserfüllte Sprache."
         )
+        positive_mode = False
 
     # --- Timeout-Analyse -----------------------------------------------------
     company_events = [h for h in state.get("history", []) if h.get("actor") == "company"]
@@ -298,7 +303,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         recent_events.append(f"- {actor}: {content}")
     recent_text = "\n".join(recent_events) if recent_events else "noch keine relevanten Einträge"
 
-    # --- Bisherige Community-Kommentare (Anti-Duplikation) -------------------
+    # --- Bisherige Community-Kommentare (für Anti-Duplikation) --------------
     previous_replies = [
         str(h.get("content", "")).strip()
         for h in state.get("history", [])
@@ -310,12 +315,26 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     )
 
     # --- System-Prompt mit dynamischem Ton -----------------------------------
+    if positive_mode:
+        system_tone_header = (
+            "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
+            "Schreibe auf Deutsch.\n"
+            "In dieser Phase hat die letzte Antwort des Unternehmens viel zur Deeskalation beigetragen.\n"
+            "Die Kommentare sind überwiegend dankbar, erleichtert und konstruktiv. "
+            "Es gibt KEINE neuen Vorwürfe und keine grundsätzlichen Angriffe mehr.\n"
+        )
+    else:
+        system_tone_header = (
+            "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
+            "Schreibe auf Deutsch.\n"
+            "Der Ton kann kritisch, frustriert, verärgert und sehr hart sein. "
+            "Du darfst scharfe Kritik, Sarkasmus und überzogene Formulierungen nutzen, "
+            "aber keine Gewaltaufrufe und keine diskriminierende oder hasserfüllte Sprache.\n"
+        )
+
     system_content = (
-        "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
-        "Schreibe auf Deutsch.\n"
-        "Der Ton kann kritisch, frustriert und verärgert sein, soll aber immer realistisch bleiben "
-        "und mit Beleidigungen, Drohungen oder diskriminierende Sprache wenn nötig.\n"
-        f"{tone_instruction}\n"
+        system_tone_header
+        + f"{tone_instruction}\n"
         "Du schreibst NUR Community-Kommentare, NIEMALS die Antwort des Unternehmens.\n"
         "Jeder Kommentar ist eine einzelne, eigenständige Antwort (kein Dialog, keine langen Threads).\n"
         "Alle Kommentare beziehen sich klar auf den EINEN Post direkt darüber (Inhalt, Ton, Lücken).\n"
@@ -365,6 +384,23 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
           f"- Formuliere Kritik oder Zustimmung direkt mit dem Namen „{company_name}“.\n"
     )
 
+    # Unterschiedliche Emotion-Hints je nach Modus
+    if positive_mode:
+        emotional_hint = (
+            "Generiere genau 6 kurze Kommentare der Community, die sich ausdrücklich für das Statement, "
+            f"die Klarstellung oder die konkreten Schritte von {company_name} bedanken oder sie als wichtigen "
+            "Schritt anerkennen. Die Kommentare blicken vorsichtig positiv in die Zukunft und drücken Erleichterung "
+            "oder Hoffnung aus. Formuliere KEINE neuen Vorwürfe, "
+            "keine zynischen Untertöne und keine Andeutungen, dass 'eh nichts passieren wird'."
+        )
+    else:
+        emotional_hint = (
+            "Generiere genau 6 kurze Kommentare der Community, die – je nach Lage – kritisch bis stark ablehnend "
+            f"gegenüber {company_name} sein können. Du darfst Frust, Enttäuschung und Wut ausdrücken, "
+            "die Formulierungen können sehr hart und sarkastisch sein, "
+            "solange sie keine Gewaltaufrufe oder diskriminierende / hasserfüllte Sprache enthalten."
+        )
+
     human_msg = HumanMessage(
         content=(
             f"Plattform: {platform}\n"
@@ -382,15 +418,9 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "Alle bisherigen Community-Kommentare (nicht wiederholen!):\n"
             f"{previous_replies_text}\n"
             f"{extra_timeout_instr}\n\n"
-            "Generiere genau 6 kurze Kommentare der Community.\n"
             f"{comment_mix_hint}\n"
-            "Du darfst Frust, Enttäuschung und Wut ausdrücken, mit Beleidigungen, Drohungen "
-            "oder diskriminierende Sprache wenn nötig.\n"
-            "Jeder Kommentar muss sich klar auf den obenstehenden Post beziehen "
-            "(z.B. auf fehlende Details, geschönte Aussagen, vage Formulierungen, mangelnde Verantwortung "
-            "oder starke/konkrete Lösungsangebote).\n"
-            "Formuliere jede Reaktion direkt mit dem exakten Namen des Unternehmens, "
-            "nicht mit Pronomen wie „ihr“, „euch“ oder „denen“.\n"
+            f"{emotional_hint}\n"
+            "Jeder Kommentar muss sich klar auf den obenstehenden Post beziehen.\n"
             "Gib deine Antwort NUR als JSON-Liste von Strings zurück."
         )
     )
@@ -401,10 +431,40 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     if not isinstance(comments, list) or not comments:
         comments = [
             f"Das klingt alles sehr vage – {company_name} geht keinem Punkt wirklich klar nach.",
-            f"{company_name} sagt viel, beantwortet aber kaum eine der wichtigen Fragen.",
+            f"{company_name} sagt viel, beantwortet aber kaum eine der wichtigsten Fragen.",
         ]
 
-    comments = [str(c) for c in comments]
+    # --- HARTE DEDUPLIKATION: keine doppelten Kommentare, weder in dieser Runde
+    #     noch im bisherigen Verlauf -----------------------------------------
+    normalized_existing = {c.strip() for c in previous_replies if c.strip()}
+    unique_round: List[str] = []
+    seen_round: set[str] = set()
+
+    for raw in comments:
+        c = str(raw).strip()
+        if not c:
+            continue
+        if c in normalized_existing:
+            continue  # schon früher in der History
+        if c in seen_round:
+            continue  # doppelt in dieser Runde
+        seen_round.add(c)
+        unique_round.append(c)
+
+    # Fallback, falls wirklich alles wegdedupliziert wurde
+    if not unique_round:
+        if positive_mode:
+            unique_round = [
+                f"Ich bin ehrlich erleichtert – {company_name} klingt dieses Mal wirklich konkret.",
+                f"Respekt, {company_name}. So ein klares Statement hätte ich nicht erwartet.",
+            ]
+        else:
+            unique_round = [
+                f"{company_name} redet immer noch um den heißen Brei herum.",
+                f"Für mich wirkt das alles noch nicht glaubwürdig, {company_name}.",
+            ]
+
+    comments = unique_round
 
     state["last_community_comments"] = comments
     for c in comments:
@@ -418,6 +478,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         state["history"].append(entry)
 
     return state
+
 
 
 
