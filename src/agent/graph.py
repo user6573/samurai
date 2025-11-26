@@ -540,7 +540,7 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
             "content": (
                 f"Intensität von {prev:.1f} auf {new_intensity:.1f} geändert "
                 f"(Δ={delta:+.1f}, Kriterien erfüllt: {fulfilled}/{criteria_total}, "
-                f\">=80%_erfüllt={solved})."
+                f">=80%_erfüllt={solved})."
             ),
         }
     )
@@ -656,7 +656,7 @@ def build_graph():
     return workflow.compile(name="Shitstorm-Simulation")
 
 
-# Diese Variable wird von LangGraph Server / Cloud geladen
+# Diese Variable wird von LangGraph Server / LangGraph Cloud geladen
 graph = build_graph()
 
 __all__ = ["graph", "ShitstormState"]
