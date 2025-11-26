@@ -218,7 +218,8 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         "Schreibe auf Deutsch.\n"
         "ALLE Kommentare sind hart, kritisch und klar gegen das Unternehmen gerichtet.\n"
         "Der Ton darf wütend, frustriert, verärgert und deutlich ablehnend sein,\n"
-        "wenn nötig MIT Beleidigungen.\n"
+        "aber OHNE Beleidigungen, Drohungen oder diskriminierende Sprache.\n"
+        "Keine Beschimpfungen, keine Beleidigungen von Personen oder Gruppen.\n"
         "Du schreibst NUR Community-Kommentare, NIEMALS die Antwort des Unternehmens.\n"
         "Jeder Kommentar ist eine einzelne, eigenständige Antwort (kein Dialog, keine langen Threads).\n"
         "Alle Kommentare beziehen sich klar auf den EINEN Post direkt darüber (Inhalt, Ton, Lücken).\n"
@@ -238,7 +239,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "- Du simulierst die „Antworten“-Sektion unter einem Post.\n"
             "- Schreibe kurze, pointierte, sehr direkte Kommentare (max. ca. 200 Zeichen).\n"
             "- Stil: typische X-Replies in einem Shitstorm – kritisch, fordernd, sarkastisch,\n"
-            "  misstrauisch gegenüber dem Unternehmen, aber wenn nötig mit Beleidigungen.\n"
+            "  misstrauisch gegenüber dem Unternehmen, aber ohne Beleidigungen.\n"
             "- Keine @Handles oder Namen im Kommentartext, die UI zeigt Namen/Handles separat.\n"
             "- Keine Hashtag-Spam, maximal 0–2 Hashtags pro Kommentar.\n"
         )
@@ -253,7 +254,8 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     elif timeout_mode == "after_response":
         extra_timeout_instr = (
             "\nZusätzlicher Fokus: Es gab bereits eine Unternehmensantwort, aber seitdem kommt nichts mehr.\n"
-            "- Das war alles? Ich dachte hier kommt noch was - thematisiert\n"
+            "- Kritisiere, dass es keine weiteren konkreten Schritte, Details oder Nachbesserungen gibt.\n"
+            "- Stelle infrage, ob das wirklich alles ist und ob das Unternehmen das Problem verstanden hat.\n"
         )
     else:
         extra_timeout_instr = ""
@@ -284,13 +286,8 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             f"{previous_replies_text}\n"
             f"{extra_timeout_instr}\n\n"
             "Generiere 3 bis 6 harte, kritische Kommentare der Community.\n"
-            "Abhängig von der aktuellen Intensitätveränderung sollen die Kommentare von stark negativ zu bisschen positiv gehen. 
-            z.B. 
-            +10 -> alle negativ
-            +5 -> ein Kommentar nicht stark negativ
-            +5 -> hälfte positiv hälfte negativ
-            +10 -> alle positiv bis auf ein Kommentar\n"
-            "Du darfst Frust, Enttäuschung und Wut ausdrücken.\n"
+            "ALLE Kommentare sollen deutlich skeptisch oder ablehnend gegenüber dem Unternehmen sein.\n"
+            "Du darfst Frust, Enttäuschung und Wut ausdrücken, solange du nicht beleidigend wirst.\n"
             "Jeder Kommentar muss sich klar auf den obenstehenden Post beziehen "
             "(z.B. auf fehlende Details, geschönte Aussagen, vage Formulierungen, mangelnde Verantwortung "
             "oder schwache Lösungen).\n"
