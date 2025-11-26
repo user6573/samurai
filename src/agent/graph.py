@@ -20,12 +20,14 @@ from langchain_core.messages import SystemMessage, HumanMessage
 os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
 os.environ.setdefault("LANGSMITH_TRACING", "false")
 
+# Spezieller Marker, den dein Frontend bei Timeout als "Antwort" setzt
+TIMEOUT_MARKER_PREFIX = "[AUTOMATISCHE COMMUNITY-REAKTION"
+
 
 class ShitstormState(TypedDict):
     """Gesamter Zustand der Shitstorm-Simulation.
 
-    Dieser State wird zwischen den Nodes hin- und hergereicht und am Ende
-    als Ergebnis zurückgegeben. Alle Keys müssen JSON-serialisierbar sein.
+    Alle Keys müssen JSON-serialisierbar sein.
     """
 
     platform: str
@@ -41,35 +43,45 @@ class ShitstormState(TypedDict):
     intensity: float
     status: Literal["running", "user_won", "user_lost"]
     summary: str
+    # Die folgenden Keys werden dynamisch ergänzt, müssen nicht im Initial-State sein:
+    # criteria_all_met: bool
+    # criteria_missing: List[str]
+    # criteria_fulfilled_count: int
+    # criteria_total: int
 
 
-# Marker, der aus x.html bei Reaktionszeit-Timeout als "Antwort" geschickt wird
-TIMEOUT_MARKER_PREFIX = "[AUTOMATISCHE COMMUNITY-REAKTION"
-
+# --------------------------------------------------------------------------- #
+# Hilfsfunktionen
+# --------------------------------------------------------------------------- #
 
 def _safe_load_json(text: str):
     """Versuche, robust JSON aus einem LLM-Output zu laden."""
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            candidate = text[start : end + 1]
-            try:
-                return json.loads(candidate)
-            except json.JSONDecodeError:
-                return None
-        # Evtl. reine Liste ohne geschweifte Klammern
-        start = text.find("[")
-        end = text.rfind("]")
-        if start != -1 and end != -1 and end > start:
-            candidate = text[start : end + 1]
-            try:
-                return json.loads(candidate)
-            except json.JSONDecodeError:
-                return None
-        return None
+        pass
+
+    # Objekt
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start : end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # Liste
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start : end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 def _make_llm() -> ChatOpenAI:
@@ -78,9 +90,12 @@ def _make_llm() -> ChatOpenAI:
     Das Modell kann über die Umgebungsvariable OPENAI_MODEL überschrieben werden.
     """
     model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    # OPENAI_API_KEY kommt ebenfalls aus der Umgebung (.env im Projekt).
     return ChatOpenAI(model=model_name, temperature=0.3)
 
+
+# --------------------------------------------------------------------------- #
+# Community-Runde – harte, kritische, anti-duplizierte Kommentare
+# --------------------------------------------------------------------------- #
 
 def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     """Generiert Community-Kommentare für die aktuelle Runde."""
@@ -91,23 +106,29 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     platform = state["platform"]
     cause = state["cause"]
     company_name = state["company_name"]
-    intensity = state["intensity"]
-    last_answer = state["last_company_response"]
-    reaction_score = state["reaction_score"]
+    # Start-Intensität auf 50 setzen (erste Runde)
+    prev_intensity = float(state.get("intensity", 50.0))
+    if round_num == 1:
+        state["intensity"] = 50.0
+    intensity = float(state.get("intensity", prev_intensity))
 
-    # Erkennen, ob wir im X/Twitter-Interface sind
+    last_answer = state.get("last_company_response", "")
+    reaction_score = float(state.get("reaction_score", 50.0))
+
+    # Erkennen, ob X/Twitter-Interface
     is_x = False
     if isinstance(platform, str):
         pl = platform.lower()
         is_x = pl.startswith("x") or "twitter" in pl
 
-    # Beschreibung der Situation im Verlauf
+    # Beschreibung der Situation im Verlauf (für Kontext)
     if round_num == 1:
         situation_desc = "Dies sind die ersten Reaktionen der Community auf den Auslöser."
     else:
         if reaction_score >= 65:
             situation_desc = (
-                "Die letzte Antwort des Unternehmens wurde überwiegend positiv aufgenommen."
+                "Die letzte Antwort des Unternehmens wurde eher positiv wahrgenommen, "
+                "aber die Community ist weiterhin kritisch."
             )
         elif reaction_score >= 45:
             situation_desc = (
@@ -118,7 +139,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
                 "Die letzte Antwort des Unternehmens kam schlecht an und hat die Community eher verärgert."
             )
 
-    # --- Timeout-Analyse: wurde die Ausführung wegen abgelaufener Reaktionszeit fortgesetzt? ---
+    # --- Timeout-Analyse: Reaktionszeit überschritten? ------------------------
     company_events = [
         h for h in state.get("history", []) if h.get("actor") == "company"
     ]
@@ -135,15 +156,13 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     )
 
     if last_is_timeout and not had_real_company_response_before:
-        # Noch nie eine echte Unternehmensantwort -> Community beschwert sich über Schweigen
         timeout_mode: Literal["no_response", "after_response", "none"] = "no_response"
     elif last_is_timeout and had_real_company_response_before:
-        # Es gab schon mind. eine echte Antwort -> Community fragt sich, ob das alles war
         timeout_mode = "after_response"
     else:
         timeout_mode = "none"
 
-    # Welcher Post hängt direkt über den Kommentaren?
+    # --- Welcher Post hängt direkt über den Kommentaren? ----------------------
     if timeout_mode == "no_response":
         target_post_type = (
             "Beschwerde-Post einer Nutzerin / eines Nutzers "
@@ -165,7 +184,6 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         )
         target_post_text = real_company_answer or last_answer or cause
     else:
-        # Normalfall ohne Timeout-Fokus
         if round_num == 1:
             target_post_type = "Beschwerde-Post einer Nutzerin / eines Nutzers"
             target_post_text = cause
@@ -173,7 +191,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             target_post_type = "öffentliche Antwort des Unternehmens"
             target_post_text = last_answer or cause
 
-    # Kurzer Auszug aus der bisherigen History, damit die Replies konsistenter werden
+    # --- Kurzer Auszug aus der bisherigen History -----------------------------
     recent_events: List[str] = []
     for h in state.get("history", [])[-6:]:
         actor = h.get("actor", "?")
@@ -183,65 +201,67 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         recent_events.append(f"- {actor}: {content}")
     recent_text = "\n".join(recent_events) if recent_events else "noch keine relevanten Einträge"
 
-    # Grund-Prompt
+    # --- Bisherige Community-Kommentare (Anti-Duplikation) --------------------
+    previous_replies = [
+        str(h.get("content", "")).strip()
+        for h in state.get("history", [])
+        if h.get("actor") == "community"
+    ]
+    previous_replies_text = (
+        "\n".join(f"- {c}" for c in previous_replies[-25:])
+        if previous_replies else "Keine bisherigen Community-Kommentare."
+    )
+
+    # --- System-Prompt: harter, feindseliger Ton (ohne Beleidigung) ----------
+
     system_content = (
         "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
-        "Schreibe auf Deutsch, im typischen Ton der jeweiligen Plattform.\n"
-        "Erzeuge realistische wenn nötig beleidigende Kommentare.\n"
+        "Schreibe auf Deutsch.\n"
+        "ALLE Kommentare sind hart, kritisch und klar gegen das Unternehmen gerichtet.\n"
+        "Der Ton darf wütend, frustriert, verärgert und deutlich ablehnend sein,\n"
+        "aber OHNE Beleidigungen, Drohungen oder diskriminierende Sprache.\n"
+        "Keine Beschimpfungen, keine Beleidigungen von Personen oder Gruppen.\n"
         "Du schreibst NUR Community-Kommentare, NIEMALS die Antwort des Unternehmens.\n"
         "Jeder Kommentar ist eine einzelne, eigenständige Antwort (kein Dialog, keine langen Threads).\n"
+        "Alle Kommentare beziehen sich klar auf den EINEN Post direkt darüber (Inhalt, Ton, Lücken).\n"
         "Antwort NUR als JSON-Liste von Strings, z.B.:\n"
         '  [\"Kommentar 1\", \"Kommentar 2\", \"...\"]\n'
         "Kein zusätzlicher Text, keine Erklärungen, keine JSON-Objekte.\n"
-        "Achte auf Varianz: Mindestens eine starke Kritik, eine sachlich-konstruktive Stimme "
-        "SEHR WICHTIG:\n"
-        "- Die Kommentare stehen direkt unter EINEM konkreten Post.\n"
-        "- Der Hauptpunkt jedes Kommentars muss sich klar auf GENAU diesen Post beziehen "
-        "(Inhalt, Ton, Versprechen oder Lücken dieses Posts).\n"
-        "- Schreibe KEINE völlig allgemeinen Aussagen über das Unternehmen, sondern reagiere "
-        "auf das, was in diesem Post steht oder NICHT steht.\n"
+        "WICHTIG:\n"
+        "- Erzeuge Kommentare, die NICHT identisch oder fast identisch mit früheren "
+        "Community-Kommentaren sind.\n"
+        "- Keine Wiederholungen, keine fast gleichen Formulierungen.\n"
+        "- Jeder Kommentar muss neu, frisch und eindeutig formuliert sein.\n"
     )
 
-    # Spezieller Stil, wenn wir im X-Interface sind
     if is_x:
         system_content += (
             "\nSpezifisch für die Plattform X/Twitter:\n"
             "- Du simulierst die „Antworten“-Sektion unter einem Post.\n"
-            "- Schreibe kurze, pointierte Kommentare (max. ca. 200 Zeichen).\n"
-            "- Ton: wie typische X-Replies – direkt, emotional, manchmal sarkastisch, gerne auch ironisch.\n"
-            "- Du kannst gelegentlich Emojis oder Ironie nutzen, aber übertreibe nicht.\n"
+            "- Schreibe kurze, pointierte, sehr direkte Kommentare (max. ca. 200 Zeichen).\n"
+            "- Stil: typisch X-Replies in einem Shitstorm – kritisch, fordernd, sarkastisch,\n"
+            "  misstrauisch gegenüber dem Unternehmen, aber ohne Beleidigungen.\n"
             "- Keine @Handles oder Namen im Kommentartext, die UI zeigt Namen/Handles separat.\n"
-            "- Keine Hashtags-Spam, maximal 0–2 Hashtags pro Kommentar.\n"
-            "- Jeder Kommentar soll deutlich machen, dass er sich auf GENAU diesen Post bezieht "
-                "\nWICHTIG:\n"
-            "- Erzeuge Kommentare, die NICHT identisch oder fast identisch mit früheren Kommentaren sind.\n"
-            "- Keine Wiederholungen, keine wiederverwendeten Formulierungen.\n"
-            "- Jeder Kommentar MUSS neu und einzigartig klingen.\n"
-            "- Formuliere jedes Mal neue Kritik, neue Perspektiven oder neue Nuancen.\n"
-            "(z.B. durch Formulierungen wie „diese Antwort“, „das hier“, „euer Statement oben“ usw.).\n"
+            "- Keine Hashtag-Spam, maximal 0–2 Hashtags pro Kommentar.\n"
         )
 
-    system_msg = SystemMessage(content=system_content)
-
-    # Timeout-spezifische Zusatzinstruktionen
+    # Timeout-spezifische Verschärfung
     if timeout_mode == "no_response":
         extra_timeout_instr = (
-            "\nZusätzlicher Fokus: Die Community ist frustriert, dass das Unternehmen bisher GAR NICHT "
-            "öffentlich reagiert hat. Die Kommentare kritisieren vor allem:\n"
-            "- Schweigen und Nicht-Reagieren\n"
-            "- zu lange Reaktionszeiten\n"
-            "- das Gefühl, ignoriert zu werden\n"
-            "Trotzdem: keine Beleidigungen, keine Diskriminierung.\n"
+            "\nZusätzlicher Fokus: Das Unternehmen hat TROTZ Shitstorm noch nicht öffentlich reagiert.\n"
+            "- Kritisiere explizit das Schweigen, die fehlende Reaktion und das Ignorieren der Community.\n"
+            "- Stelle infrage, wie ernst das Unternehmen die Situation wirklich nimmt.\n"
         )
     elif timeout_mode == "after_response":
         extra_timeout_instr = (
-            "\nZusätzlicher Fokus: Die Community fragt sich, ob das wirklich alles war. "
-            "Die Kommentare kritisieren vor allem:\n"
-            "- dass nach die vorherige Antwort zu wenig war\n"
-            "Formuliere das kritisch, gerne auch zugespitzt, aber ohne Beleidigungen oder Diskriminierung.\n"
+            "\nZusätzlicher Fokus: Es gab bereits eine Unternehmensantwort, aber seitdem kommt nichts mehr.\n"
+            "- Kritisiere, dass es keine weiteren konkreten Schritte, Details oder Nachbesserungen gibt.\n"
+            "- Stelle infrage, ob das wirklich alles ist und ob das Unternehmen das Problem verstanden hat.\n"
         )
     else:
         extra_timeout_instr = ""
+
+    system_msg = SystemMessage(content=system_content)
 
     human_msg = HumanMessage(
         content=(
@@ -255,10 +275,17 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             f"Art des Posts: {target_post_type}\n"
             f"Post-Inhalt:\n\"\"\"{target_post_text}\"\"\"\n\n"
             "Relevante Ausschnitte aus dem bisherigen Verlauf:\n"
-            f"{recent_text}\n"
-            f"{extra_timeout_instr}\n"
-            "Generiere 6 kurze Kommentare der Community, die sich klar und hauptsächlich "
-            "auf diesen einen Post beziehen. Mische:\n"
+            f"{recent_text}\n\n"
+            "Alle bisherigen Community-Kommentare (nicht wiederholen!):\n"
+            f"{previous_replies_text}\n"
+            f"{extra_timeout_instr}\n\n"
+            "Generiere 3 bis 6 harte, kritische Kommentare der Community.\n"
+            "ALLE Kommentare sollen deutlich skeptisch oder ablehnend gegenüber dem Unternehmen sein.\n"
+            "Du darfst Frust, Enttäuschung und Wut ausdrücken, solange du nicht beleidigend wirst.\n"
+            "Jeder Kommentar muss sich klar auf den obenstehenden Post beziehen "
+            "(z.B. auf fehlende Details, geschönte Aussagen, vage Formulierungen, mangelnde Verantwortung "
+            "oder schwache Lösungen).\n"
+            "Gib deine Antwort NUR als JSON-Liste von Strings zurück."
         )
     )
 
@@ -266,11 +293,10 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     comments = _safe_load_json(result.content) or []
 
     if not isinstance(comments, list) or not comments:
-        # Fallback: Zeilenweise interpretieren
-        lines = [ln.strip("- ").strip() for ln in result.content.splitlines() if ln.strip()]
-        comments = lines[:5] or [
-            "Ich bin echt sauer über diese Situation.",
-            "So kann ein Unternehmen nicht mit seinen Kund:innen umgehen.",
+        # Fallback
+        comments = [
+            "Das klingt alles sehr vage – ihr geht keinem Punkt wirklich klar nach.",
+            "Ihr sagt viel, aber beantwortet kaum eine der wichtigen Fragen.",
         ]
 
     comments = [str(c) for c in comments]
@@ -282,8 +308,6 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "round": round_num,
             "content": c,
         }
-        # Meta-Flag, damit man im Verlauf später erkennen kann,
-        # dass diese Kommentare als X-Replies gedacht waren.
         if is_x:
             entry["section"] = "x_replies"
         state["history"].append(entry)
@@ -291,8 +315,12 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     return state
 
 
+# --------------------------------------------------------------------------- #
+# Human-in-the-loop Node für Unternehmensantwort
+# --------------------------------------------------------------------------- #
+
 def company_response_node(state: ShitstormState) -> ShitstormState:
-    """Human-in-the-loop Node für die Unternehmensantwort."""
+    """Human-in-the-loop Node für die Unternehmensantwort (via interrupt)."""
     prompt_payload: Dict[str, Any] = {
         "type": "company_response_request",
         "round": state["round"],
@@ -315,7 +343,6 @@ def company_response_node(state: ShitstormState) -> ShitstormState:
         answer = str(resume_value or "").strip()
 
     if not answer:
-        # Keine neue Antwort – Status unverändert lassen
         return state
 
     state["last_company_response"] = answer
@@ -328,6 +355,10 @@ def company_response_node(state: ShitstormState) -> ShitstormState:
     )
     return state
 
+
+# --------------------------------------------------------------------------- #
+# LLM-Evaluation nach deinen Kriterien
+# --------------------------------------------------------------------------- #
 
 def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     """Bewertet die Unternehmensantwort anhand der definierten Kriterien."""
@@ -346,6 +377,7 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "3) Statement / Entschuldigung – Klares Statement und ggf. ehrliche Entschuldigung.\n"
             "4) Wer sagt das? – Absender / Verantwortliche Person oder Funktion ist eindeutig.\n"
             "5) Lösung – Es ist klar, was das Unternehmen als Lösung / nächste Schritte anbietet.\n"
+            "6) Schnell – Die Antwort wirkt zeitnah und zeigt, dass das Unternehmen das Thema ernst nimmt.\n"
             "7) Authentisch – Wirkt ehrlich, nicht wie reine PR-Floskel.\n"
             "8) Professionell – Ton und Struktur sind respektvoll, klar und angemessen.\n"
             "9) Verifiziert & transparent – Offenheit über Fakten, Status, Prüfungen, Zahlen, Hintergründe.\n"
@@ -406,7 +438,7 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     if not isinstance(missing_criteria, list):
         missing_criteria = [str(missing_criteria)]
 
-    # Score, den wir für UI/Debug verwenden: %-Anteil erfüllter Kriterien
+    # Score: Prozentsatz erfüllter Kriterien
     if criteria_total > 0:
         reaction_score = 100.0 * fulfilled_count / criteria_total
     else:
@@ -417,12 +449,12 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
 
     feedback = data.get("feedback") or "Keine detaillierte Rückmeldung verfügbar."
 
-    # Alte Felder behalten wir für Kompatibilität, nutzen sie aber als Proxy für die Kriterienerfüllung
+    # Für UI/Kompatibilität
     state["politeness_score"] = reaction_score
     state["responsibility_score"] = reaction_score
     state["reaction_score"] = reaction_score
 
-    # Neue interne Felder für die Intensitätslogik
+    # Interne Kriterien-Daten
     state["criteria_all_met"] = all_criteria_met
     state["criteria_missing"] = missing_criteria
     state["criteria_fulfilled_count"] = fulfilled_count
@@ -445,15 +477,19 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     return state
 
 
+# --------------------------------------------------------------------------- #
+# Intensität – max. +20 Verschlechterung
+# --------------------------------------------------------------------------- #
+
 def update_intensity(state: ShitstormState) -> ShitstormState:
     """Aktualisiert die Shitstorm-Intensität basierend auf den Kriterien.
 
     Logik:
-    - Wenn ALLE Kriterien erfüllt sind -> Intensität stark senken, so dass man praktisch gewinnt.
-    - Wenn NICHT alle Kriterien erfüllt sind -> Intensität um 10–50 Punkte erhöhen,
-      abhängig davon, wie viele Kriterien fehlen.
+    - Wenn ALLE Kriterien erfüllt sind -> Intensität stark senken (praktisch gewonnen).
+    - Wenn NICHT alle Kriterien erfüllt sind -> Intensität um 5–20 Punkte erhöhen,
+      abhängig davon, wie viele Kriterien fehlen (max. +20).
     """
-    prev = state["intensity"]
+    prev = float(state.get("intensity", 50.0))
 
     all_met = bool(state.get("criteria_all_met"))
     criteria_total = int(state.get("criteria_total") or 0)
@@ -461,18 +497,17 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
 
     if all_met and criteria_total > 0 and fulfilled >= criteria_total:
         # Perfekte Antwort: Shitstorm bricht fast komplett ab
-        new_intensity = min(prev, 5.0)  # max. 5/100
+        new_intensity = min(prev, 5.0)
         delta = new_intensity - prev
     else:
-        # Nicht alle Kriterien erfüllt -> Shitstorm verschärft sich um +10 bis +50
         if criteria_total > 0:
             missing = max(0, criteria_total - fulfilled)
             missing_ratio = missing / criteria_total
         else:
             missing_ratio = 1.0
 
-        # Lineare Skalierung: 10 + (0..1)*40 -> 10..50
-        delta = 10.0 + missing_ratio * 40.0
+        # NEU: max. +20 (5 .. 20)
+        delta = 5.0 + missing_ratio * 15.0
         new_intensity = max(0.0, min(100.0, prev + delta))
 
     state["intensity"] = new_intensity
@@ -484,15 +519,14 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
     else:
         state["status"] = "running"
 
-    criteria_total_safe = criteria_total if criteria_total > 0 else 0
     state["history"].append(
         {
             "actor": "system",
             "round": state["round"],
             "content": (
                 f"Intensität von {prev:.1f} auf {new_intensity:.1f} geändert "
-                f"(Delta={delta:+.1f}, Kriterien erfüllt: {fulfilled}/{criteria_total_safe}, "
-                f"alle_criteria_ertefüllt={all_met})."
+                f"(Δ={delta:+.1f}, Kriterien erfüllt: {fulfilled}/{criteria_total}, "
+                f"alle_kriterien_erfüllt={all_met})."
             ),
         }
     )
@@ -506,6 +540,10 @@ def route_after_update(state: ShitstormState) -> str:
         return "continue"
     return "end"
 
+
+# --------------------------------------------------------------------------- #
+# Zusammenfassung
+# --------------------------------------------------------------------------- #
 
 def summarize(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     """Erzeugt eine kurze Zusammenfassung des Verlaufs auf Basis der Kriterien."""
@@ -561,6 +599,10 @@ def summarize(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     state["summary"] = summary
     return state
 
+
+# --------------------------------------------------------------------------- #
+# Graph-Bau
+# --------------------------------------------------------------------------- #
 
 def build_graph():
     """Erzeugt den ausführbaren LangGraph-Workflow für die Simulation."""
