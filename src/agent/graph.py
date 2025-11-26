@@ -213,6 +213,11 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "- Keine @Handles oder Namen im Kommentartext, die UI zeigt Namen/Handles separat.\n"
             "- Keine Hashtags-Spam, maximal 0–2 Hashtags pro Kommentar.\n"
             "- Jeder Kommentar soll deutlich machen, dass er sich auf GENAU diesen Post bezieht "
+                "\nWICHTIG:\n"
+            "- Erzeuge Kommentare, die NICHT identisch oder fast identisch mit früheren Kommentaren sind.\n"
+            "- Keine Wiederholungen, keine wiederverwendeten Formulierungen.\n"
+            "- Jeder Kommentar MUSS neu und einzigartig klingen.\n"
+            "- Formuliere jedes Mal neue Kritik, neue Perspektiven oder neue Nuancen.\n"
             "(z.B. durch Formulierungen wie „diese Antwort“, „das hier“, „euer Statement oben“ usw.).\n"
         )
 
