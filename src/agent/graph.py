@@ -218,8 +218,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         "Schreibe auf Deutsch.\n"
         "ALLE Kommentare sind hart, kritisch und klar gegen das Unternehmen gerichtet.\n"
         "Der Ton darf wütend, frustriert, verärgert und deutlich ablehnend sein,\n"
-        "aber OHNE Beleidigungen, Drohungen oder diskriminierende Sprache.\n"
-        "Keine Beschimpfungen, keine Beleidigungen von Personen oder Gruppen.\n"
+        "wenn nötig MIT Beleidigungen.\n"
         "Du schreibst NUR Community-Kommentare, NIEMALS die Antwort des Unternehmens.\n"
         "Jeder Kommentar ist eine einzelne, eigenständige Antwort (kein Dialog, keine langen Threads).\n"
         "Alle Kommentare beziehen sich klar auf den EINEN Post direkt darüber (Inhalt, Ton, Lücken).\n"
@@ -239,7 +238,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "- Du simulierst die „Antworten“-Sektion unter einem Post.\n"
             "- Schreibe kurze, pointierte, sehr direkte Kommentare (max. ca. 200 Zeichen).\n"
             "- Stil: typische X-Replies in einem Shitstorm – kritisch, fordernd, sarkastisch,\n"
-            "  misstrauisch gegenüber dem Unternehmen, aber ohne Beleidigungen.\n"
+            "  misstrauisch gegenüber dem Unternehmen, aber wenn nötig mit Beleidigungen.\n"
             "- Keine @Handles oder Namen im Kommentartext, die UI zeigt Namen/Handles separat.\n"
             "- Keine Hashtag-Spam, maximal 0–2 Hashtags pro Kommentar.\n"
         )
@@ -254,8 +253,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     elif timeout_mode == "after_response":
         extra_timeout_instr = (
             "\nZusätzlicher Fokus: Es gab bereits eine Unternehmensantwort, aber seitdem kommt nichts mehr.\n"
-            "- Kritisiere, dass es keine weiteren konkreten Schritte, Details oder Nachbesserungen gibt.\n"
-            "- Stelle infrage, ob das wirklich alles ist und ob das Unternehmen das Problem verstanden hat.\n"
+            "- Das war alles? Ich dachte hier kommt noch was - thematisiert\n"
         )
     else:
         extra_timeout_instr = ""
@@ -286,8 +284,13 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             f"{previous_replies_text}\n"
             f"{extra_timeout_instr}\n\n"
             "Generiere 3 bis 6 harte, kritische Kommentare der Community.\n"
-            "ALLE Kommentare sollen deutlich skeptisch oder ablehnend gegenüber dem Unternehmen sein.\n"
-            "Du darfst Frust, Enttäuschung und Wut ausdrücken, solange du nicht beleidigend wirst.\n"
+            "Abhängig von der aktuellen Intensitätveränderung sollen die Kommentare von stark negativ zu bisschen positiv gehen. 
+            z.B. 
+            +10 -> alle negativ
+            +5 -> ein Kommentar nicht stark negativ
+            +5 -> hälfte positiv hälfte negativ
+            +10 -> alle positiv bis auf ein Kommentar\n"
+            "Du darfst Frust, Enttäuschung und Wut ausdrücken.\n"
             "Jeder Kommentar muss sich klar auf den obenstehenden Post beziehen "
             "(z.B. auf fehlende Details, geschönte Aussagen, vage Formulierungen, mangelnde Verantwortung "
             "oder schwache Lösungen).\n"
@@ -365,11 +368,11 @@ def company_response_node(state: ShitstormState) -> ShitstormState:
 
 
 # --------------------------------------------------------------------------- #
-# LLM-Evaluation nach Kriterien (Transparenz gnädiger, insgesamt großzügig)
+# LLM-Evaluation nach neuen 4 Kriterien
 # --------------------------------------------------------------------------- #
 
 def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
-    """Bewertet die Unternehmensantwort anhand der definierten Kriterien."""
+    """Bewertet die Unternehmensantwort anhand von 4 Kern-Kriterien."""
     platform = state["platform"]
     cause = state["cause"]
     company_name = state["company_name"]
@@ -378,29 +381,18 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     system_msg = SystemMessage(
         content=(
             "Du bist ein professioneller Coach für Krisenkommunikation in sozialen Medien.\n"
-            "Bewerte Antworten von Unternehmen in Shitstorms NUR anhand der folgenden Kriterien:\n"
-            "1) Präzise & vollständig: Text mit so viel Inhalt wie notwendig, aber nicht mehr; "
-            "   möglichst kein Spielraum zur Interpretation.\n"
-            "2) Was ist passiert? – Klar erklärt, was konkret vorgefallen ist.\n"
-            "3) Statement / Entschuldigung – Klares Statement und ggf. ehrliche Entschuldigung.\n"
-            "4) Wer sagt das? – Absender / verantwortliche Person oder Funktion ist eindeutig.\n"
-            "5) Lösung – Es ist klar, was das Unternehmen als Lösung / nächste Schritte anbietet.\n"
-            "6) Schnell – Die Antwort wirkt zeitnah und zeigt, dass das Unternehmen das Thema ernst nimmt.\n"
-            "7) Authentisch – Wirkt ehrlich, nicht wie reine PR-Floskel.\n"
-            "8) Professionell – Ton und Struktur sind respektvoll, klar und angemessen.\n"
-            "9) Verifiziert & transparent – Offenheit über Fakten, Status, Prüfungen, Zahlen, Hintergründe.\n"
-            "10) Positiv & lösungsorientiert – Fokus auf Lösungen und Verbesserung statt Abwehr.\n"
-            "11) Ganzheitlich & einheitlich – Die Antwort ist in sich stimmig, widerspricht sich nicht "
-            "    und adressiert die wichtigsten Punkte der Kritik.\n\n"
-            "Bewerte eher großzügig:\n"
-            "- Wenn ein Kriterium teilweise erfüllt ist, setze es in der Regel auf true.\n"
-            "- Nur wenn ein Aspekt klar fehlt oder deutlich zu schwach ist, setze das Kriterium auf false.\n"
+            "Bewerte Antworten von Unternehmen in Shitstorms NUR anhand dieser vier Kriterien:\n"
+            "1) Authentisch – wirkt ehrlich, menschlich und nicht wie reine PR-Floskel.\n"
+            "2) Professionell – Ton und Struktur sind respektvoll, klar, verständlich und angemessen.\n"
+            "3) Positiv & lösungsorientiert – Fokus auf konkrete Lösungen, nächste Schritte und Verbesserung,\n"
+            "   nicht auf Abwehr, Relativierung oder Ausreden.\n"
+            "4) Ganzheitlich & einheitlich – die Antwort ist in sich stimmig, widerspricht sich nicht und\n"
+            "   adressiert die wichtigsten Punkte der Kritik.\n\n"
+            "Bewerte bewusst eher großzügig:\n"
+            "- Ein Kriterium gilt als erfüllt (true), wenn es voll ODER überwiegend erfüllt ist,\n"
+            "  auch wenn kleinere Lücken oder Schwächen vorhanden sind.\n"
+            "- Setze ein Kriterium nur dann auf false, wenn es klar nicht oder nur sehr schwach erkennbar erfüllt ist.\n"
             "- In Zweifelsfällen entscheide dich für true.\n\n"
-            "Spezielle Regel für das Kriterium \"verifiziert_transparent\":\n"
-            "- Setze dieses Kriterium bereits dann auf true, wenn die Antwort wenigstens einige "
-            "konkrete Fakten, Beispiele, Zahlen, Status-Updates oder Einblicke in Prozesse enthält.\n"
-            "- Setze dieses Kriterium nur auf false, wenn praktisch keine überprüfbaren oder "
-            "nachvollziehbaren Informationen vorhanden sind.\n\n"
             "Du antwortest ausschließlich als JSON-Objekt, ohne zusätzlichen Text."
         )
     )
@@ -412,20 +404,13 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             f"Unternehmen: {company_name}\n"
             f"Ursache des Shitstorms: {cause}\n\n"
             f"Antwort des Unternehmens:\n\"\"\"{answer}\"\"\"\n\n"
-            "Bewerte, inwiefern die Antwort die oben genannten Kriterien erfüllt.\n"
+            "Bewerte, inwiefern die Antwort die vier Kriterien erfüllt.\n"
             "Gib deine Antwort NUR als gültiges JSON im folgenden Format zurück:\n"
             "{\n"
             '  \"overall\": <Zahl 0-100>,\n'
             '  \"criteria\": {\n'
-            '    \"praezise_ohne_spielraum\": true/false,\n'
-            '    \"klar_was_passiert\": true/false,\n'
-            '    \"statement_oder_entschuldigung\": true/false,\n'
-            '    \"wer_sagt_das\": true/false,\n'
-            '    \"loesung_angeboten\": true/false,\n'
-            '    \"schnell\": true/false,\n'
             '    \"authentisch\": true/false,\n'
             '    \"professionell\": true/false,\n'
-            '    \"verifiziert_transparent\": true/false,\n'
             '    \"positiv_loesungsorientiert\": true/false,\n'
             '    \"ganzheitlich_einheitlich\": true/false\n'
             "  },\n"
@@ -441,7 +426,8 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     data = _safe_load_json(result.content) or {}
 
     criteria: Dict[str, Any] = data.get("criteria") or {}
-    criteria_total = len(criteria) if isinstance(criteria, dict) and criteria else 11
+    # Standardmäßig 4 Kriterien, falls das Modell Mist baut
+    criteria_total = len(criteria) if isinstance(criteria, dict) and criteria else 4
 
     fulfilled_count = 0
     if isinstance(criteria, dict):
@@ -495,18 +481,21 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
 
 
 # --------------------------------------------------------------------------- #
-# Intensität – 80%-Lösungsschwelle, „gute“ Reaktion senkt Intensität, max. +20
+# Intensität – 80%-Schwelle (alle erfüllt), 60–79% gute Reaktion, max. +20
 # --------------------------------------------------------------------------- #
 
 def update_intensity(state: ShitstormState) -> ShitstormState:
     """Aktualisiert die Shitstorm-Intensität basierend auf den Kriterien.
 
-    Logik:
-    - Wenn mindestens 80 % der Kriterien erfüllt sind -> Intensität stark senken (praktisch gewonnen).
-    - Wenn 60–79 % erfüllt sind -> Intensität spürbar SENKEN (gute Reaktion, Shitstorm legt sich).
-    - Wenn weniger als 60 % erfüllt sind -> Intensität um 5–20 Punkte erhöhen
-      (maximale Verschlechterung bleibt +20).
-    - Eine „gute“ Reaktion (>=60 %) darf niemals dazu führen, dass man durch Intensitätserhöhung verliert.
+    Logik mit 4 Kriterien:
+    - Wenn mindestens 80 % der Kriterien erfüllt sind (bei 4 Kriterien: 4/4) ->
+      Intensität stark senken (praktisch gewonnen).
+    - Wenn 60–79 % erfüllt sind (bei 4 Kriterien: 3/4) ->
+      Intensität spürbar SENKEN (gute Reaktion, Shitstorm legt sich).
+    - Wenn weniger als 60 % erfüllt sind (0–2/4) ->
+      Intensität um 5–20 Punkte erhöhen (maximale Verschlechterung bleibt +20).
+    - Eine „gute“ Reaktion (>=60 %) darf niemals dazu führen, dass man durch
+      Intensitätserhöhung direkt verliert.
     """
     prev = float(state.get("intensity", 50.0))
 
@@ -606,13 +595,8 @@ def summarize(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         content=(
             "Du bist ein Coach für Krisenkommunikation und sollst eine Trainingssimulation auswerten.\n"
             "Bewerte insbesondere, wie gut die Antworten des Unternehmens folgende Kriterien erfüllt haben:\n"
-            "- präzise & eindeutig (kein unnötiger Ballast, wenig Spielraum für Interpretation)\n"
-            "- klar erklärt: Was ist passiert?\n"
-            "- Statement / Entschuldigung\n"
-            "- klare Absender-Rolle (wer spricht?)\n"
-            "- konkrete Lösung / nächste Schritte\n"
-            "- schnell, authentisch, professionell\n"
-            "- verifiziert & transparent\n"
+            "- authentisch\n"
+            "- professionell\n"
             "- positiv & lösungsorientiert\n"
             "- ganzheitlich & einheitlich\n\n"
             "Fasse den Verlauf des Shitstorms und das Verhalten des Users zusammen.\n"
