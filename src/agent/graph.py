@@ -98,7 +98,11 @@ def _make_llm() -> ChatOpenAI:
 # --------------------------------------------------------------------------- #
 
 def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
-    """Generiert Community-Kommentare für die aktuelle Runde."""
+    """Generiert Community-Kommentare für die aktuelle Runde.
+
+    Die Härte / Gemeinheit der Kommentare hängt von der letzten
+    Intensitätsänderung (Δ) ab, die im update_intensity-Node gesetzt wird.
+    """
 
     state["round"] += 1
     round_num = state["round"]
@@ -116,64 +120,114 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     last_answer = state.get("last_company_response", "")
     reaction_score = float(state.get("reaction_score", 50.0))
 
+    # Δ-Intensität aus der letzten Runde (durch den letzten Post verursacht)
+    last_delta = float(state.get("last_intensity_delta", 0.0))
+
     # Erkennen, ob X/Twitter-Interface
     is_x = False
     if isinstance(platform, str):
         pl = platform.lower()
         is_x = pl.startswith("x") or "twitter" in pl
 
-    # Beschreibung der Situation im Verlauf
+    # Beschreibung der Situation im Verlauf (für das LLM)
     if round_num == 1:
-        situation_desc = "Dies sind die ersten Reaktionen der Community auf den Auslöser."
+        situation_desc = (
+            "Dies sind die ersten Reaktionen der Community auf den Auslöser. "
+            "Es gibt noch keine offizielle Antwort des Unternehmens."
+        )
     else:
-        if reaction_score >= 75:
+        if last_delta <= -15:
             situation_desc = (
-                "Viele in der Community erkennen an, dass das Unternehmen sich ernsthaft bemüht "
-                "und konkrete Schritte gesetzt hat. Der Shitstorm flacht sichtbar ab."
+                "Die letzte Antwort des Unternehmens hat den Shitstorm deutlich beruhigt. "
+                "Viele nehmen wahr, dass konkrete Verantwortung übernommen wurde."
             )
-        elif reaction_score >= 60:
+        elif last_delta <= -5:
             situation_desc = (
-                "Ein Teil der Community sieht die Antwort als Schritt in die richtige Richtung, "
-                "ein anderer Teil bleibt kritisch."
+                "Die letzte Antwort des Unternehmens hat die Lage etwas entspannt, "
+                "aber es gibt weiterhin offene Punkte und Kritik."
             )
-        elif reaction_score >= 45:
+        elif last_delta < 5:
             situation_desc = (
-                "Die letzte Antwort des Unternehmens war gemischt und hat die Lage nur leicht beruhigt."
+                "Die letzte Antwort des Unternehmens hat kaum etwas an der Situation verändert. "
+                "Teile der Community sind unzufrieden, andere abwartend."
+            )
+        elif last_delta < 15:
+            situation_desc = (
+                "Die letzte Antwort des Unternehmens hat den Shitstorm eher verschärft. "
+                "Viele sind noch unzufriedener und sehen zu wenig echte Veränderung."
             )
         else:
             situation_desc = (
-                "Die letzte Antwort des Unternehmens kam schlecht an und hat die Community eher verärgert."
+                "Die letzte Antwort des Unternehmens hat die Lage stark eskalieren lassen. "
+                "Die Community reagiert sehr wütend und extrem misstrauisch."
             )
 
-    # --- Tonfall abhängig von der Qualität der letzten Antwort --------------
-    if reaction_score >= 80:
-        tone_instruction = (
-            "Die meisten Kommentare erkennen an, dass die aktuelle Antwort und die Maßnahmen von "
-            f"{company_name} ernst gemeint sind. Es gibt noch einzelne kritische Hinweise, "
-            "aber insgesamt wird der Ton deutlich konstruktiver und der Shitstorm flacht ab.\n"
-        )
-        comment_mix_hint = (
-            "Erzeuge überwiegend konstruktive, teilweise positive Kommentare, die anerkennen, "
-            f"dass {company_name} Verantwortung übernimmt und konkrete Schritte setzt. "
-            "Einige wenige Kommentare dürfen noch kritisch sein, aber nicht mehr völlig eskalierend."
-        )
-    elif reaction_score >= 60:
-        tone_instruction = (
-            "Die Community ist gespalten: Einige sehen die Antwort als guten ersten Schritt, "
-            f"andere finden, dass {company_name} noch nicht weit genug geht.\n"
-        )
-        comment_mix_hint = (
-            "Mische kritische Kommentare mit einigen, die den Kurswechsel und die Maßnahmen von "
-            f"{company_name} als Fortschritt anerkennen."
-        )
+    # Härte-Level aus Δ ableiten
+    if round_num == 1:
+        severity = "initial"
+    elif last_delta <= -15:
+        severity = "strong_decrease"
+    elif last_delta <= -5:
+        severity = "mild_decrease"
+    elif last_delta < 5:
+        severity = "neutral"
+    elif last_delta < 15:
+        severity = "mild_increase"
     else:
+        severity = "strong_increase"
+
+    if severity == "initial":
         tone_instruction = (
-            "Die meisten Kommentare sind weiterhin stark kritisch bis wütend, "
-            f"das Vertrauen in {company_name} ist noch deutlich erschüttert.\n"
+            "Die Community reagiert zum ersten Mal auf den Auslöser. "
+            "Die Kommentare sind deutlich kritisch, wütend und fordernd."
         )
         comment_mix_hint = (
-            "Erzeuge überwiegend kritische Kommentare, die Unzufriedenheit und Misstrauen gegenüber "
-            f"{company_name} ausdrücken."
+            "Erzeuge überwiegend harte, kritische Kommentare, die deutlich machen, "
+            f"dass {company_name} mit der Kampagne / dem Vorfall eine Grenze überschritten hat."
+        )
+    elif severity == "strong_decrease":
+        tone_instruction = (
+            "Die letzte Antwort und die Maßnahmen von "
+            f"{company_name} haben den Shitstorm deutlich beruhigt. "
+            "Viele sehen, dass sich wirklich etwas bewegt."
+        )
+        comment_mix_hint = (
+            "Erzeuge überwiegend konstruktive, eher positive Kommentare, die anerkennen, "
+            f"dass {company_name} Verantwortung übernommen und konkrete Schritte angekündigt hat. "
+            "Einige wenige Kommentare dürfen noch kritisch sein, aber nicht mehr maximal eskalierend."
+        )
+    elif severity == "mild_decrease":
+        tone_instruction = (
+            "Die Community erkennt erste Fortschritte an, ist aber noch nicht vollständig überzeugt."
+        )
+        comment_mix_hint = (
+            "Mische kritische mit konstruktiven Kommentaren: Einige anerkennen, "
+            f"dass {company_name} sich bewegt, andere betonen, was noch fehlt."
+        )
+    elif severity == "neutral":
+        tone_instruction = (
+            "Die letzte Antwort hat kaum etwas verändert. Die Stimmung ist gemischt."
+        )
+        comment_mix_hint = (
+            "Erzeuge eine Mischung aus nüchtern-kritischen, skeptischen und wenigen neutralen Kommentaren. "
+            "Es gibt weder klare Entspannung noch massive Verschärfung."
+        )
+    elif severity == "mild_increase":
+        tone_instruction = (
+            "Die Community ist eher noch kritischer geworden. Die Antwort wirkt vielen zu schwach."
+        )
+        comment_mix_hint = (
+            "Erzeuge überwiegend harte, kritische Kommentare, die deutlich machen, "
+            f"dass {company_name} noch zu wenig Verantwortung übernimmt oder zu vage bleibt."
+        )
+    else:  # strong_increase
+        tone_instruction = (
+            "Die letzte Antwort hat großen Frust ausgelöst. Die Community fühlt sich nicht ernst genommen."
+        )
+        comment_mix_hint = (
+            "Erzeuge sehr scharfe, deutlich ablehnende Kommentare, die großes Misstrauen "
+            f"gegenüber {company_name} ausdrücken. Bleibe dabei deutlich, aber ohne Beleidigungen, "
+            "Drohungen oder diskriminierende Sprache."
         )
 
     # --- Timeout-Analyse -----------------------------------------------------
@@ -248,13 +302,12 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     )
 
     # --- System-Prompt mit dynamischem Ton -----------------------------------
-
     system_content = (
         "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
         "Schreibe auf Deutsch.\n"
         "Der Ton kann kritisch, frustriert und verärgert sein, soll aber immer realistisch bleiben "
-        "mit Beleidigungen, Drohungen oder diskriminierende Sprache wenn nötig.\n"
-        f"{tone_instruction}"
+        "und mit Beleidigungen, Drohungen oder diskriminierende Sprache wenn nötig.\n"
+        f"{tone_instruction}\n"
         "Du schreibst NUR Community-Kommentare, NIEMALS die Antwort des Unternehmens.\n"
         "Jeder Kommentar ist eine einzelne, eigenständige Antwort (kein Dialog, keine langen Threads).\n"
         "Alle Kommentare beziehen sich klar auf den EINEN Post direkt darüber (Inhalt, Ton, Lücken).\n"
@@ -272,9 +325,9 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         system_content += (
             "\nSpezifisch für die Plattform X/Twitter:\n"
             "- Du simulierst die „Antworten“-Sektion unter einem Post.\n"
-            "- Schreibe kurze, pointierte, emotionale sehr direkte Kommentare (max. ca. 200 Zeichen).\n"
-            "- Stil: typische X-Replies – je nach Situation teils kritisch, teils zustimmend, "
-            "aber immer knapp und auf den Punkt.\n"
+            "- Schreibe kurze, pointierte, sehr direkte Kommentare (max. ca. 200 Zeichen).\n"
+            "- Stil je nach Lage: von stark kritisch bis zunehmend konstruktiv, "
+            "abhängig von der beschriebenen Intensitätsänderung.\n"
             "- Keine @Handles oder Namen im Kommentartext, die UI zeigt Namen/Handles separat.\n"
             "- Keine Hashtag-Spam, maximal 0–2 Hashtags pro Kommentar.\n"
         )
@@ -301,7 +354,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         + f"\nZusatzregel:\n"
           f"- Wenn in den Kommentaren über das Unternehmen gesprochen wird, verwende IMMER den exakten Namen „{company_name}“.\n"
           f"- Verwende KEINE allgemeinen Pronomen wie „ihr“, „euch“, „denen“, „die Firma“, „dieser Laden“ oder ähnliche Umschreibungen.\n"
-          f"- Formuliere die Kritik oder Zustimmung direkt mit dem Namen „{company_name}“.\n"
+          f"- Formuliere Kritik oder Zustimmung direkt mit dem Namen „{company_name}“.\n"
     )
 
     human_msg = HumanMessage(
@@ -311,6 +364,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             f"Ursache des Shitstorms: {cause}\n"
             f"Aktuelle Shitstorm-Intensität (0-100): {intensity}\n"
             f"Runde: {round_num}\n"
+            f"Letzte Intensitätsänderung (Δ): {last_delta:+.1f} Punkte\n"
             f"Situation: {situation_desc}\n\n"
             "Der folgende Post steht direkt über der Kommentarspalte, die du simulierst:\n"
             f"Art des Posts: {target_post_type}\n"
@@ -322,8 +376,8 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             f"{extra_timeout_instr}\n\n"
             "Generiere genau 6 kurze Kommentare der Community.\n"
             f"{comment_mix_hint}\n"
-            "Du darfst Frust, Enttäuschung und Wut ausdrücken,mit Beleidigungen, Drohungen "
-            "oder diskriminierende Sprache wenn es realistischer ist.\n"
+            "Du darfst Frust, Enttäuschung und Wut ausdrücken, mit Beleidigungen, Drohungen "
+            "oder diskriminierende Sprache wenn nötig.\n"
             "Jeder Kommentar muss sich klar auf den obenstehenden Post beziehen "
             "(z.B. auf fehlende Details, geschönte Aussagen, vage Formulierungen, mangelnde Verantwortung "
             "oder starke/konkrete Lösungsangebote).\n"
@@ -590,6 +644,8 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
         good_but_not_solved = False
 
     state["intensity"] = new_intensity
+    # NEU: Delta für die nächste Community-Runde speichern
+    state["last_intensity_delta"] = float(delta)
 
     # Status-Logik: bei „guten“ Reaktionen (>=60 %) niemals direkt verlieren
     if new_intensity < 10.0:
@@ -615,6 +671,7 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
     )
 
     return state
+
 
 
 
