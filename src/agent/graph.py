@@ -365,7 +365,7 @@ def company_response_node(state: ShitstormState) -> ShitstormState:
 
 
 # --------------------------------------------------------------------------- #
-# LLM-Evaluation nach Kriterien (jetzt „großzügiger“)
+# LLM-Evaluation nach Kriterien (Transparenz gnädiger, insgesamt großzügig)
 # --------------------------------------------------------------------------- #
 
 def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
@@ -396,6 +396,11 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "- Wenn ein Kriterium teilweise erfüllt ist, setze es in der Regel auf true.\n"
             "- Nur wenn ein Aspekt klar fehlt oder deutlich zu schwach ist, setze das Kriterium auf false.\n"
             "- In Zweifelsfällen entscheide dich für true.\n\n"
+            "Spezielle Regel für das Kriterium \"verifiziert_transparent\":\n"
+            "- Setze dieses Kriterium bereits dann auf true, wenn die Antwort wenigstens einige "
+            "konkrete Fakten, Beispiele, Zahlen, Status-Updates oder Einblicke in Prozesse enthält.\n"
+            "- Setze dieses Kriterium nur auf false, wenn praktisch keine überprüfbaren oder "
+            "nachvollziehbaren Informationen vorhanden sind.\n\n"
             "Du antwortest ausschließlich als JSON-Objekt, ohne zusätzlichen Text."
         )
     )
@@ -490,7 +495,7 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
 
 
 # --------------------------------------------------------------------------- #
-# Intensität – Lösung ab 80 % erfüllter Kriterien, max. +20 Verschlechterung
+# Intensität – 80%-Lösungsschwelle, „gute“ Reaktion senkt Intensität, max. +20
 # --------------------------------------------------------------------------- #
 
 def update_intensity(state: ShitstormState) -> ShitstormState:
@@ -498,8 +503,10 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
 
     Logik:
     - Wenn mindestens 80 % der Kriterien erfüllt sind -> Intensität stark senken (praktisch gewonnen).
-    - Wenn weniger als 80 % erfüllt sind -> Intensität um 5–20 Punkte erhöhen
+    - Wenn 60–79 % erfüllt sind -> Intensität spürbar SENKEN (gute Reaktion, Shitstorm legt sich).
+    - Wenn weniger als 60 % erfüllt sind -> Intensität um 5–20 Punkte erhöhen
       (maximale Verschlechterung bleibt +20).
+    - Eine „gute“ Reaktion (>=60 %) darf niemals dazu führen, dass man durch Intensitätserhöhung verliert.
     """
     prev = float(state.get("intensity", 50.0))
 
@@ -512,12 +519,19 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
         fulfilled_ratio = 0.0
 
     if criteria_total > 0 and fulfilled_ratio >= 0.8:
-        # Gute Antwort: Shitstorm bricht fast komplett ab
+        # Sehr gute Antwort: Shitstorm bricht fast komplett ab
         new_intensity = min(prev, 5.0)
         delta = new_intensity - prev
         solved = True
+        good_but_not_solved = False
+    elif criteria_total > 0 and fulfilled_ratio >= 0.6:
+        # Gute Antwort: Shitstorm legt sich deutlich, aber noch nicht komplett gelöst
+        delta = -10.0
+        new_intensity = max(0.0, prev + delta)
+        solved = False
+        good_but_not_solved = True
     else:
-        # Nicht genug Kriterien erfüllt -> Shitstorm verschärft sich um 5–20 Punkte
+        # Antwort ist nicht gut genug -> Shitstorm verschärft sich um 5–20 Punkte
         if criteria_total > 0:
             missing_ratio = 1.0 - fulfilled_ratio
         else:
@@ -527,13 +541,19 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
         delta = 5.0 + missing_ratio * 15.0
         new_intensity = max(0.0, min(100.0, prev + delta))
         solved = False
+        good_but_not_solved = False
 
     state["intensity"] = new_intensity
 
+    # Status-Logik: bei „guten“ Reaktionen (>=60 %) niemals direkt verlieren
     if new_intensity < 10.0:
         state["status"] = "user_won"
     elif new_intensity > 90.0:
-        state["status"] = "user_lost"
+        if criteria_total > 0 and fulfilled_ratio >= 0.6:
+            # Sicherheitsnetz: gute Reaktion darf nicht zum sofortigen „user_lost“ führen
+            state["status"] = "running"
+        else:
+            state["status"] = "user_lost"
     else:
         state["status"] = "running"
 
@@ -544,7 +564,7 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
             "content": (
                 f"Intensität von {prev:.1f} auf {new_intensity:.1f} geändert "
                 f"(Δ={delta:+.1f}, Kriterien erfüllt: {fulfilled}/{criteria_total}, "
-                f">=80%_erfüllt={solved})."
+                f">=80%_erfüllt={solved}, >=60%_gut_aber_nicht_gelöst={good_but_not_solved})."
             ),
         }
     )
