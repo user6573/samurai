@@ -393,7 +393,7 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
 
     human_msg = HumanMessage(
         content=(
-            "Bewerte die folgende Antwort eines Unternehmens in einem Shitstorm.\n\n"
+            "Bewerte die folgende Antwort eines Unternehmens in einem Shitstorm. - Sei nicht zu streng!\n\n"
             f"Plattform: {platform}\n"
             f"Unternehmen: {company_name}\n"
             f"Ursache des Shitstorms: {cause}\n\n"
