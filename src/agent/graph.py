@@ -187,14 +187,13 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     system_content = (
         "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
         "Schreibe auf Deutsch, im typischen Ton der jeweiligen Plattform.\n"
-        "Erzeuge realistische, aber nicht beleidigende Kommentare.\n"
+        "Erzeuge realistische wenn nötig beleidigende Kommentare.\n"
         "Du schreibst NUR Community-Kommentare, NIEMALS die Antwort des Unternehmens.\n"
         "Jeder Kommentar ist eine einzelne, eigenständige Antwort (kein Dialog, keine langen Threads).\n"
         "Antwort NUR als JSON-Liste von Strings, z.B.:\n"
         '  [\"Kommentar 1\", \"Kommentar 2\", \"...\"]\n'
         "Kein zusätzlicher Text, keine Erklärungen, keine JSON-Objekte.\n"
         "Achte auf Varianz: Mindestens eine starke Kritik, eine sachlich-konstruktive Stimme "
-        "und optional eine Stimme, die das Unternehmen teilweise verteidigt.\n"
         "SEHR WICHTIG:\n"
         "- Die Kommentare stehen direkt unter EINEM konkreten Post.\n"
         "- Der Hauptpunkt jedes Kommentars muss sich klar auf GENAU diesen Post beziehen "
@@ -209,7 +208,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "\nSpezifisch für die Plattform X/Twitter:\n"
             "- Du simulierst die „Antworten“-Sektion unter einem Post.\n"
             "- Schreibe kurze, pointierte Kommentare (max. ca. 200 Zeichen).\n"
-            "- Ton: wie typische X-Replies – direkt, emotional, manchmal sarkastisch, aber nicht beleidigend.\n"
+            "- Ton: wie typische X-Replies – direkt, emotional, manchmal sarkastisch, gerne auch ironisch.\n"
             "- Du kannst gelegentlich Emojis oder Ironie nutzen, aber übertreibe nicht.\n"
             "- Keine @Handles oder Namen im Kommentartext, die UI zeigt Namen/Handles separat.\n"
             "- Keine Hashtags-Spam, maximal 0–2 Hashtags pro Kommentar.\n"
@@ -233,9 +232,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         extra_timeout_instr = (
             "\nZusätzlicher Fokus: Die Community fragt sich, ob das wirklich alles war. "
             "Die Kommentare kritisieren vor allem:\n"
-            "- dass nach dieser Antwort keine weiteren konkreten Schritte, Details oder Nachbesserungen kommen\n"
-            "- dass die Reaktion halbherzig, PR-mäßig oder zu oberflächlich wirkt\n"
-            "- dass die Verantwortung nicht wirklich übernommen wird\n"
+            "- dass nach die vorherige Antwort zu wenig war\n"
             "Formuliere das kritisch, gerne auch zugespitzt, aber ohne Beleidigungen oder Diskriminierung.\n"
         )
     else:
@@ -255,12 +252,8 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "Relevante Ausschnitte aus dem bisherigen Verlauf:\n"
             f"{recent_text}\n"
             f"{extra_timeout_instr}\n"
-            "Generiere 3 bis 6 kurze Kommentare der Community, die sich klar und hauptsächlich "
+            "Generiere 6 kurze Kommentare der Community, die sich klar und hauptsächlich "
             "auf diesen einen Post beziehen. Mische:\n"
-            "- mindestens eine klare, auch emotionale Kritik\n"
-            "- mindestens einen sachlich-konstruktiven Kommentar\n"
-            "- optional einen Kommentar, der das Unternehmen teilweise verteidigt\n"
-            "Es darf hart, aber nicht beleidigend oder diskriminierend sein."
         )
     )
 
@@ -348,7 +341,6 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "3) Statement / Entschuldigung – Klares Statement und ggf. ehrliche Entschuldigung.\n"
             "4) Wer sagt das? – Absender / Verantwortliche Person oder Funktion ist eindeutig.\n"
             "5) Lösung – Es ist klar, was das Unternehmen als Lösung / nächste Schritte anbietet.\n"
-            "6) Schnell – Die Antwort wirkt zeitnah und zeigt, dass das Unternehmen das Thema ernst nimmt.\n"
             "7) Authentisch – Wirkt ehrlich, nicht wie reine PR-Floskel.\n"
             "8) Professionell – Ton und Struktur sind respektvoll, klar und angemessen.\n"
             "9) Verifiziert & transparent – Offenheit über Fakten, Status, Prüfungen, Zahlen, Hintergründe.\n"
