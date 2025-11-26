@@ -598,7 +598,7 @@ def summarize(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "Gib konkrete Lernpunkte und Verbesserungsvorschläge, strukturiert an diesen Kriterien.\n"
             "Antwort auf Deutsch, in 2–4 kurzen Absätzen."
 
-            "Gib an welche Kriterien wann erfüllt wurden
+            "Gib an welche Kriterien wann erfüllt wurden\n"
         )
     )
 
