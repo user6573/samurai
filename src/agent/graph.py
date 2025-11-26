@@ -393,7 +393,7 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
 
     human_msg = HumanMessage(
         content=(
-            "Bewerte die folgende Antwort eines Unternehmens in einem Shitstorm. - Sei nicht zu streng!\n\n"
+            "Bewerte die folgende Antwort eines Unternehmens in einem Shitstorm.\n\n"
             f"Plattform: {platform}\n"
             f"Unternehmen: {company_name}\n"
             f"Ursache des Shitstorms: {cause}\n\n"
@@ -419,37 +419,66 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     result = llm.invoke([system_msg, human_msg])
     data = _safe_load_json(result.content) or {}
 
-    criteria: Dict[str, Any] = data.get("criteria") or {}
-    # Standardmäßig 4 Kriterien, falls das Modell Mist baut
-    criteria_total = len(criteria) if isinstance(criteria, dict) and criteria else 4
+    # --- overall-Score robust extrahieren -----------------------------------
+    try:
+        overall_raw = float(data.get("overall", 0.0))
+    except (TypeError, ValueError):
+        overall_raw = 0.0
+    overall = max(0.0, min(100.0, overall_raw))
 
-    fulfilled_count = 0
-    if isinstance(criteria, dict):
-        fulfilled_count = sum(1 for v in criteria.values() if bool(v))
+    # --- Kriterien robust verarbeiten / fallbacken ---------------------------
+    raw_criteria = data.get("criteria")
+    criteria: Dict[str, bool]
 
-    all_criteria_met = bool(data.get("all_criteria_met"))
-    if criteria and "all_criteria_met" not in data:
-        all_criteria_met = all(bool(v) for v in criteria.values())
-
-    missing_criteria = data.get("missing_criteria") or []
-    if not isinstance(missing_criteria, list):
-        missing_criteria = [str(missing_criteria)]
-
-    # Score: Prozentsatz erfüllter Kriterien
-    if criteria_total > 0:
-        reaction_score = 100.0 * fulfilled_count / criteria_total
+    if isinstance(raw_criteria, dict) and raw_criteria:
+        # Modell hat die Struktur eingehalten
+        criteria = {k: bool(v) for k, v in raw_criteria.items()}
+        criteria_total = len(criteria)
+        fulfilled_count = sum(1 for v in criteria.values() if v)
     else:
-        try:
-            reaction_score = float(data.get("overall", 50.0))
-        except (TypeError, ValueError):
-            reaction_score = 50.0
+        # Fallback: aus overall grob ableiten, wie viele Kriterien erfüllt sind
+        # 4 Kriterien -> Wir mappen:
+        #  - >= 80 -> 4 erfüllt
+        #  - 60–79 -> 3 erfüllt
+        #  - 40–59 -> 2 erfüllt
+        #  - 20–39 -> 1 erfüllt
+        #  - < 20  -> 0 erfüllt
+        criteria_total = 4
+        if overall >= 80:
+            fulfilled_count = 4
+        elif overall >= 60:
+            fulfilled_count = 3
+        elif overall >= 40:
+            fulfilled_count = 2
+        elif overall >= 20:
+            fulfilled_count = 1
+        else:
+            fulfilled_count = 0
+
+        keys = ["authentisch", "professionell", "positiv_loesungsorientiert", "ganzheitlich_einheitlich"]
+        criteria = {}
+        for idx, key in enumerate(keys):
+            criteria[key] = fulfilled_count > idx  # 1. Kriterium als erstes "true" usw.
+
+    # Verhältnis & fehlende Kriterien
+    if criteria_total > 0:
+        fulfilled_ratio = fulfilled_count / criteria_total
+    else:
+        fulfilled_ratio = 0.0
+
+    missing_criteria = [k for k, v in criteria.items() if not v]
+    all_criteria_met = criteria_total > 0 and fulfilled_count == criteria_total
+
+    # Wenn overall im JSON fehlt, aus Kriterien ableiten
+    if overall == 0.0 and criteria_total > 0:
+        overall = fulfilled_ratio * 100.0
 
     feedback = data.get("feedback") or "Keine detaillierte Rückmeldung verfügbar."
 
-    # Für UI/Kompatibilität
-    state["politeness_score"] = reaction_score
-    state["responsibility_score"] = reaction_score
-    state["reaction_score"] = reaction_score
+    # Scores für Frontend
+    state["politeness_score"] = overall
+    state["responsibility_score"] = overall
+    state["reaction_score"] = overall
 
     # Interne Kriterien-Daten
     state["criteria_all_met"] = all_criteria_met
@@ -474,10 +503,6 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     return state
 
 
-# --------------------------------------------------------------------------- #
-# Intensität – 80%-Schwelle (alle erfüllt), 60–79% gute Reaktion, max. +20
-# --------------------------------------------------------------------------- #
-
 def update_intensity(state: ShitstormState) -> ShitstormState:
     """Aktualisiert die Shitstorm-Intensität basierend auf den Kriterien.
 
@@ -496,18 +521,20 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
     criteria_total = int(state.get("criteria_total") or 0)
     fulfilled = int(state.get("criteria_fulfilled_count") or 0)
 
+    # Fallback: wenn irgendwas mit Kriterien schiefging, nutze reaction_score
     if criteria_total > 0:
         fulfilled_ratio = fulfilled / criteria_total
     else:
-        fulfilled_ratio = 0.0
+        reaction_score = float(state.get("reaction_score", 50.0))
+        fulfilled_ratio = max(0.0, min(1.0, reaction_score / 100.0))
 
-    if criteria_total > 0 and fulfilled_ratio >= 0.8:
+    if fulfilled_ratio >= 0.8:
         # Sehr gute Antwort: Shitstorm bricht fast komplett ab
         new_intensity = min(prev, 5.0)
         delta = new_intensity - prev
         solved = True
         good_but_not_solved = False
-    elif criteria_total > 0 and fulfilled_ratio >= 0.6:
+    elif fulfilled_ratio >= 0.6:
         # Gute Antwort: Shitstorm legt sich deutlich, aber noch nicht komplett gelöst
         delta = -10.0
         new_intensity = max(0.0, prev + delta)
@@ -515,11 +542,7 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
         good_but_not_solved = True
     else:
         # Antwort ist nicht gut genug -> Shitstorm verschärft sich um 5–20 Punkte
-        if criteria_total > 0:
-            missing_ratio = 1.0 - fulfilled_ratio
-        else:
-            missing_ratio = 1.0
-
+        missing_ratio = 1.0 - fulfilled_ratio
         # Skala: 5 .. 20 (max +20 Verschlechterung)
         delta = 5.0 + missing_ratio * 15.0
         new_intensity = max(0.0, min(100.0, prev + delta))
@@ -532,7 +555,7 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
     if new_intensity < 10.0:
         state["status"] = "user_won"
     elif new_intensity > 90.0:
-        if criteria_total > 0 and fulfilled_ratio >= 0.6:
+        if fulfilled_ratio >= 0.6:
             # Sicherheitsnetz: gute Reaktion darf nicht zum sofortigen „user_lost“ führen
             state["status"] = "running"
         else:
@@ -546,13 +569,13 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
             "round": state["round"],
             "content": (
                 f"Intensität von {prev:.1f} auf {new_intensity:.1f} geändert "
-                f"(Δ={delta:+.1f}, Kriterien erfüllt: {fulfilled}/{criteria_total}, "
-                f">=80%_erfüllt={solved}, >=60%_gut_aber_nicht_gelöst={good_but_not_solved})."
+                f"(Δ={delta:+.1f}, Verhältnis erfüllter Kriterien={fulfilled_ratio:.2f})."
             ),
         }
     )
 
     return state
+
 
 
 def route_after_update(state: ShitstormState) -> str:
