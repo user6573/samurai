@@ -1,18 +1,3 @@
-Wir machen den Coach „freundlicher“ 😄 – also gleiche Logik, aber das LLM soll die Kriterien **großzügiger** als erfüllt zählen.
-
-Ich habe NUR den `llm_evaluate`-Prompt angepasst:
-
-* Explizite Anweisung:
-
-  * „Bewerte eher großzügig“
-  * „Wenn ein Kriterium teilweise erfüllt ist → true“
-  * „Nur klar fehlende Dinge als false“
-
-Alles andere (harte Kommentare, 80 %-Schwelle, max. +20 Intensitätsanstieg, Firmenname, Timeout, Anti-Duplikation) bleibt unverändert.
-
-Hier der komplette, aktualisierte `graph.py`:
-
-```python
 """LangGraph graph definition for the Shitstorm-Simulation agent.
 
 Dieses File wird von LangGraph Server / LangGraph Cloud geladen.
@@ -679,4 +664,3 @@ def build_graph():
 graph = build_graph()
 
 __all__ = ["graph", "ShitstormState"]
-```
