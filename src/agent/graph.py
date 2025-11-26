@@ -189,20 +189,26 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         tone_instruction = (
             "Die letzte Antwort und die Maßnahmen von "
             f"{company_name} haben den Shitstorm deutlich beruhigt. "
-            "Viele sehen, dass sich wirklich etwas bewegt."
+            "Viele in der Community empfinden das Statement als klare, längst fällige Klarstellung "
+            "und sehen eine echte Bereitschaft zur Veränderung."
         )
         comment_mix_hint = (
-            "Erzeuge überwiegend konstruktive, eher positive Kommentare, die anerkennen, "
-            f"dass {company_name} Verantwortung übernommen und konkrete Schritte angekündigt hat. "
-            "Einige wenige Kommentare dürfen noch kritisch sein, aber nicht mehr maximal eskalierend."
+            "Erzeuge überwiegend leicht positive, dankbare und zukunftsorientierte Kommentare. "
+            f"Die Leute bedanken sich explizit für das Statement bzw. die Klarstellung von {company_name}, "
+            "loben die konkreten Schritte und blicken vorsichtig positiv in die Zukunft "
+            "(z.B. Hoffnung, dass es jetzt wirklich besser wird). "
+            "Ein paar wenige Kommentare dürfen noch vorsichtig skeptisch sein, aber nicht mehr scharf angreifend."
         )
     elif severity == "mild_decrease":
         tone_instruction = (
-            "Die Community erkennt erste Fortschritte an, ist aber noch nicht vollständig überzeugt."
+            "Die Community erkennt Fortschritte an und nimmt das Statement von "
+            f"{company_name} überwiegend positiv wahr, auch wenn noch nicht alles perfekt ist."
         )
         comment_mix_hint = (
-            "Mische kritische mit konstruktiven Kommentaren: Einige anerkennen, "
-            f"dass {company_name} sich bewegt, andere betonen, was noch fehlt."
+            "Mische überwiegend konstruktive Kommentare, die sich für die Klarstellung und die ersten Schritte "
+            f"von {company_name} bedanken, mit einigen Kommentaren, die freundlich darauf hinweisen, "
+            "dass bestimmte Punkte noch weiter präzisiert oder nachgehalten werden sollten. "
+            "Die Grundstimmung ist: ‚Danke, guter Anfang, bitte dranbleiben.‘"
         )
     elif severity == "neutral":
         tone_instruction = (
