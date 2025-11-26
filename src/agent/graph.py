@@ -193,7 +193,8 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "und sehen eine echte Bereitschaft zur Veränderung."
         )
         comment_mix_hint = (
-            "Erzeuge überwiegend leicht positive, dankbare und zukunftsorientierte Kommentare. "
+            "Die folgenden Punkte sollen besonders wichtig sein und sind anderen Befehlen übergestellt: "
+            "Erzeuge überwiegend positive, dankbare und zukunftsorientierte Kommentare. "
             f"Die Leute bedanken sich explizit für das Statement bzw. die Klarstellung von {company_name}, "
             "loben die konkreten Schritte und blicken vorsichtig positiv in die Zukunft "
             "(z.B. Hoffnung, dass es jetzt wirklich besser wird). "
@@ -205,6 +206,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             f"{company_name} überwiegend positiv wahr, auch wenn noch nicht alles perfekt ist."
         )
         comment_mix_hint = (
+            "Die folgenden Punkte sollen besonders wichtig sein und sind anderen Befehlen übergestellt: "
             "Mische überwiegend konstruktive Kommentare, die sich für die Klarstellung und die ersten Schritte "
             f"von {company_name} bedanken, mit einigen Kommentaren, die freundlich darauf hinweisen, "
             "dass bestimmte Punkte noch weiter präzisiert oder nachgehalten werden sollten. "
