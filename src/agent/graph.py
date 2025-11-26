@@ -1,3 +1,18 @@
+Wir machen den Coach „freundlicher“ 😄 – also gleiche Logik, aber das LLM soll die Kriterien **großzügiger** als erfüllt zählen.
+
+Ich habe NUR den `llm_evaluate`-Prompt angepasst:
+
+* Explizite Anweisung:
+
+  * „Bewerte eher großzügig“
+  * „Wenn ein Kriterium teilweise erfüllt ist → true“
+  * „Nur klar fehlende Dinge als false“
+
+Alles andere (harte Kommentare, 80 %-Schwelle, max. +20 Intensitätsanstieg, Firmenname, Timeout, Anti-Duplikation) bleibt unverändert.
+
+Hier der komplette, aktualisierte `graph.py`:
+
+```python
 """LangGraph graph definition for the Shitstorm-Simulation agent.
 
 Dieses File wird von LangGraph Server / LangGraph Cloud geladen.
@@ -365,7 +380,7 @@ def company_response_node(state: ShitstormState) -> ShitstormState:
 
 
 # --------------------------------------------------------------------------- #
-# LLM-Evaluation nach Kriterien
+# LLM-Evaluation nach Kriterien (jetzt „großzügiger“)
 # --------------------------------------------------------------------------- #
 
 def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
@@ -392,6 +407,10 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "10) Positiv & lösungsorientiert – Fokus auf Lösungen und Verbesserung statt Abwehr.\n"
             "11) Ganzheitlich & einheitlich – Die Antwort ist in sich stimmig, widerspricht sich nicht "
             "    und adressiert die wichtigsten Punkte der Kritik.\n\n"
+            "Bewerte eher großzügig:\n"
+            "- Wenn ein Kriterium teilweise erfüllt ist, setze es in der Regel auf true.\n"
+            "- Nur wenn ein Aspekt klar fehlt oder deutlich zu schwach ist, setze das Kriterium auf false.\n"
+            "- In Zweifelsfällen entscheide dich für true.\n\n"
             "Du antwortest ausschließlich als JSON-Objekt, ohne zusätzlichen Text."
         )
     )
@@ -660,3 +679,4 @@ def build_graph():
 graph = build_graph()
 
 __all__ = ["graph", "ShitstormState"]
+```
