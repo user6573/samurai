@@ -1,4 +1,4 @@
-"""LangGraph graph definition for the Shitstorm-Simulation agent (Multi-Bot with Epilog).
+"""LangGraph graph definition for the Shitstorm-Simulation agent (Multi-Bot mit Epilog).
 
 Dieses File wird von LangGraph Server / LangGraph Cloud geladen.
 Die exportierte Variable `graph` ist der ausführbare Graph.
@@ -7,6 +7,7 @@ Die exportierte Variable `graph` ist der ausführbare Graph.
 from __future__ import annotations
 
 import os
+import re
 import json
 from typing import Any, Dict, List, Literal, TypedDict
 
@@ -44,9 +45,14 @@ class ShitstormState(TypedDict):
     responsibility_score: float
     reaction_score: float
     intensity: float
-    status: Literal["running", "user_won", "user_lost", "user_won_pending_epilogue"]
+    status: Literal[
+        "running",
+        "user_won",
+        "user_lost",
+        "user_won_pending_epilogue",
+    ]
     summary: str
-    # Dynamisch genutzte Felder (werden zur Laufzeit ergänzt):
+    # Dynamisch genutzte Felder:
     # last_intensity_delta: float
     # last_comment_tone: str
     # criteria_all_met: bool
@@ -66,7 +72,7 @@ def _safe_load_json(text: str):
     except json.JSONDecodeError:
         pass
 
-    # Objekt versuchen
+    # Objekt extrahieren
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
@@ -76,7 +82,7 @@ def _safe_load_json(text: str):
         except json.JSONDecodeError:
             pass
 
-    # Liste versuchen
+    # Liste extrahieren
     start = text.find("[")
     end = text.rfind("]")
     if start != -1 and end != -1 and end > start:
@@ -89,12 +95,35 @@ def _safe_load_json(text: str):
     return None
 
 
+def _normalize_comment(text: str) -> str:
+    """Aggressive Normalisierung für Deduplikation.
+
+    - Kleinbuchstaben
+    - Mehrere Whitespaces -> 1 Space
+    - Satzzeichen am Anfang/Ende weg
+    """
+    t = text.strip().lower()
+    # Satzzeichen am Anfang/Ende entfernen
+    t = re.sub(r"^[\s\.\,\!\?\-\_#\"']+|[\s\.\,\!\?\-\_#\"']+$", "", t)
+    # Mehrfach-Spaces zusammenziehen
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
 def _make_llm(env_suffix: str, default_temp: float) -> ChatOpenAI:
-    """Erzeuge ein LLM mit optionalem Suffix (NEGATIVE/NEUTRAL/EVAL)."""
+    """Erzeuge ein LLM mit optionalem Suffix (NEGATIVE/NEUTRAL/EVAL).
+
+    Die max_tokens werden bewusst hoch gesetzt, damit genug „Luft“ für komplexere
+    Antworten vorhanden ist.
+    """
     model_name = os.getenv(f"OPENAI_MODEL_{env_suffix}") or os.getenv(
         "OPENAI_MODEL", "gpt-5.1"
     )
-    return ChatOpenAI(model=model_name, temperature=default_temp)
+    return ChatOpenAI(
+        model=model_name,
+        temperature=default_temp,
+        max_tokens=1024,
+    )
 
 
 def _compute_severity(round_num: int, last_delta: float) -> str:
@@ -362,7 +391,58 @@ def community_round(
         else "Keine bisherigen Community-Kommentare."
     )
 
-    # Timeout-Spezifika
+    # System-Prompt: negativer vs. unterstützender Kommentar-Bot
+    if positive_mode:
+        system_tone_header = (
+            "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
+            "Schreibe auf Deutsch.\n"
+            "In dieser Phase hat die letzte Antwort des Unternehmens viel zur Deeskalation beigetragen.\n"
+            "Die Kommentare sind überwiegend dankbar, erleichtert und konstruktiv. "
+            "Es gibt keine neuen Vorwürfe und keine grundsätzlichen Angriffe mehr.\n"
+        )
+    else:
+        system_tone_header = (
+            "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
+            "Schreibe auf Deutsch.\n"
+            "Der Ton ist sehr hart, wütend, frustriert und spöttisch. "
+            "Du darfst harte Kritik, Sarkasmus, zynische Kommentare und auch deutliche Beleidigungen "
+            "gegen das Unternehmen und seine Entscheidungen verwenden.\n"
+            "WICHTIG: Vermeide Gewaltaufrufe und verwende KEINE rassistische, sexistische oder sonst "
+            "diskriminierende Sprache gegen Gruppen. Die Kommentare sollen maximal unangenehm für das "
+            "Unternehmen sein, aber nicht gegen ganze Bevölkerungsgruppen hetzen.\n"
+        )
+
+    system_content = (
+        system_tone_header
+        + f"{tone_instruction}\n"
+        "Du schreibst NUR Community-Kommentare, NIEMALS die Antwort des Unternehmens.\n"
+        "Jeder Kommentar ist eine einzelne, eigenständige Antwort (kein Dialog, keine langen Threads).\n"
+        "Alle Kommentare beziehen sich klar auf den EINEN Post direkt darüber (Inhalt, Ton, Lücken).\n"
+        "Du darfst typische X-Stilmittel nutzen: Emojis, Großbuchstaben für Betonung, "
+        "Auslassungspunkte, sehr direkte Formulierungen, kurze Hashtags (max. 1–2 pro Kommentar).\n"
+        "Mische sehr kurze, knallige Antworten mit etwas längeren, aber bleibe immer unter ca. 200 Zeichen.\n"
+        "Antwort NUR als JSON-Liste von Strings, z.B.:\n"
+        '  [\"Kommentar 1\", \"Kommentar 2\", \"...\"]\n'
+        "Kein zusätzlicher Text, keine Erklärungen, keine JSON-Objekte.\n"
+        "WICHTIG:\n"
+        "- Erzeuge Kommentare, die NICHT identisch oder fast identisch mit früheren "
+        "Community-Kommentaren sind.\n"
+        "- Keine Wiederholungen, keine fast gleichen Formulierungen.\n"
+        "- Jeder Kommentar muss neu, frisch, eindeutig formuliert und lesbar sein.\n"
+    )
+
+    if is_x:
+        system_content += (
+            "\nSpezifisch für die Plattform X/Twitter:\n"
+            "- Du simulierst die „Antworten“-Sektion unter einem Post.\n"
+            "- Schreibe kurze, pointierte, sehr direkte Kommentare (max. ca. 200 Zeichen).\n"
+            "- Stil je nach Lage: von stark kritisch bis zunehmend konstruktiv, "
+            "abhängig von der beschriebenen Intensitätsänderung.\n"
+            "- Keine @Handles oder Namen im Kommentartext, die UI zeigt Namen/Handles separat.\n"
+            "- Vermeide Hashtag-Spam, maximal 0–2 Hashtags pro Kommentar.\n"
+        )
+
+    # Timeout-spezifische Zusatzinstruktionen
     if t_mode == "no_response":
         extra_timeout_instr = (
             "\nZusätzlicher Fokus: Das Unternehmen hat TROTZ Shitstorm noch nicht öffentlich reagiert.\n"
@@ -378,51 +458,6 @@ def community_round(
     else:
         extra_timeout_instr = ""
 
-    # System-Prompt: negativer vs. unterstützender Kommentar-Bot
-    if positive_mode:
-        system_tone_header = (
-            "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
-            "Schreibe auf Deutsch.\n"
-            "In dieser Phase hat die letzte Antwort des Unternehmens viel zur Deeskalation beigetragen.\n"
-            "Die Kommentare sind überwiegend dankbar, erleichtert und konstruktiv. "
-            "Es gibt keine neuen Vorwürfe und keine grundsätzlichen Angriffe mehr.\n"
-        )
-    else:
-        system_tone_header = (
-            "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
-            "Schreibe auf Deutsch.\n"
-            "Der Ton kann kritisch, frustriert, verärgert und sehr hart sein. "
-            "Du darfst harte Kritik, Sarkasmus und auch Beleidigungen gegen das Unternehmen verwenden, "
-            "aber keine Gewaltaufrufe und keine diskriminierende oder hasserfüllte Sprache.\n"
-        )
-
-    system_content = (
-        system_tone_header
-        + f"{tone_instruction}\n"
-        "Du schreibst NUR Community-Kommentare, NIEMALS die Antwort des Unternehmens.\n"
-        "Jeder Kommentar ist eine einzelne, eigenständige Antwort (kein Dialog, keine langen Threads).\n"
-        "Alle Kommentare beziehen sich klar auf den EINEN Post direkt darüber (Inhalt, Ton, Lücken).\n"
-        "Antwort NUR als JSON-Liste von Strings, z.B.:\n"
-        '  [\"Kommentar 1\", \"Kommentar 2\", \"...\"]\n'
-        "Kein zusätzlicher Text, keine Erklärungen, keine JSON-Objekte.\n"
-        "WICHTIG:\n"
-        "- Erzeuge Kommentare, die NICHT identisch oder fast identisch mit früheren "
-        "Community-Kommentaren sind.\n"
-        "- Keine Wiederholungen, keine fast gleichen Formulierungen.\n"
-        "- Jeder Kommentar muss neu, frisch und eindeutig formuliert sein.\n"
-    )
-
-    if is_x:
-        system_content += (
-            "\nSpezifisch für die Plattform X/Twitter:\n"
-            "- Du simulierst die „Antworten“-Sektion unter einem Post.\n"
-            "- Schreibe kurze, pointierte, sehr direkte Kommentare (max. ca. 200 Zeichen).\n"
-            "- Stil je nach Lage: von stark kritisch bis zunehmend konstruktiv, "
-            "abhängig von der beschriebenen Intensitätsänderung.\n"
-            "- Keine @Handles oder Namen im Kommentartext, die UI zeigt Namen/Handles separat.\n"
-            "- Vermeide Hashtag-Spam, maximal 0–2 Hashtags pro Kommentar.\n"
-        )
-
     # Zusatzregel: immer Firmenname, keine Pronomen
     system_msg = SystemMessage(
         content=system_content
@@ -432,14 +467,13 @@ def community_round(
           f"- Formuliere Kritik oder Zustimmung direkt mit dem Namen „{company_name}“.\n"
     )
 
-    # Emotionale Hinweise je nach Modus
     if positive_mode:
         emotional_hint = (
             "Generiere genau 6 kurze Kommentare der Community, die sich ausdrücklich für das Statement, "
             f"die Klarstellung oder die konkreten Schritte von {company_name} bedanken oder sie als wichtigen "
             "Schritt anerkennen. Die Kommentare blicken vorsichtig positiv in die Zukunft und drücken Erleichterung "
-            "oder Hoffnung aus. Formuliere keine neuen Vorwürfe, keine zynischen Untertöne und keine Andeutungen, "
-            "dass ohnehin nichts passieren wird."
+            "oder Hoffnung aus. Formuliere keine neuen Vorwürfe, "
+            "keine zynischen Untertöne und keine Andeutungen, dass ohnehin nichts passieren wird."
         )
     else:
         emotional_hint = (
@@ -490,19 +524,26 @@ def community_round(
                 f"{company_name} sagt viel, beantwortet aber kaum eine der wichtigsten Fragen.",
             ]
 
-    # Harte Deduplication
-    normalized_existing = {c.strip() for c in previous_replies if c.strip()}
+    # --- HARTE DEDUPLIKATION über normalisierte Strings ---------------------
+    normalized_existing = {
+        _normalize_comment(c) for c in previous_replies if c.strip()
+    }
     unique_round: List[str] = []
     seen_round: set[str] = set()
+
     for raw in comments:
         c = str(raw).strip()
         if not c:
             continue
-        if c in normalized_existing or c in seen_round:
-            continue
-        seen_round.add(c)
+        norm = _normalize_comment(c)
+        if norm in normalized_existing:
+            continue  # schon früher in der History
+        if norm in seen_round:
+            continue  # doppelt in dieser Runde
+        seen_round.add(norm)
         unique_round.append(c)
 
+    # Fallback, falls wirklich alles wegdedupliziert wurde
     if not unique_round:
         if positive_mode:
             unique_round = [
@@ -649,16 +690,20 @@ def epilogue_community_round(
             f"Ich finde es stark, wie {company_name} hier Verantwortung übernimmt und konkrete Schritte ankündigt.",
         ]
 
-    normalized_existing = {c.strip() for c in previous_replies if c.strip()}
+    normalized_existing = {
+        _normalize_comment(c) for c in previous_replies if c.strip()
+    }
     unique_round: List[str] = []
     seen_round: set[str] = set()
+
     for raw in comments:
         c = str(raw).strip()
         if not c:
             continue
-        if c in normalized_existing or c in seen_round:
+        norm = _normalize_comment(c)
+        if norm in normalized_existing or norm in seen_round:
             continue
-        seen_round.add(c)
+        seen_round.add(norm)
         unique_round.append(c)
 
     if not unique_round:
