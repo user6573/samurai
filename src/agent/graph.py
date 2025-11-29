@@ -1,4 +1,4 @@
-"""LangGraph graph definition for the Shitstorm-Simulation agent (Multi-Bot).
+"""LangGraph graph definition for the Shitstorm-Simulation agent (Multi-Bot with Epilog).
 
 Dieses File wird von LangGraph Server / LangGraph Cloud geladen.
 Die exportierte Variable `graph` ist der ausführbare Graph.
@@ -44,7 +44,7 @@ class ShitstormState(TypedDict):
     responsibility_score: float
     reaction_score: float
     intensity: float
-    status: Literal["running", "user_won", "user_lost"]
+    status: Literal["running", "user_won", "user_lost", "user_won_pending_epilogue"]
     summary: str
     # Dynamisch genutzte Felder (werden zur Laufzeit ergänzt):
     # last_intensity_delta: float
@@ -541,6 +541,154 @@ def community_round(
 
 
 # --------------------------------------------------------------------------- #
+# Epilog-Community-Runde nach Sieg
+# --------------------------------------------------------------------------- #
+
+def epilogue_community_round(
+    state: ShitstormState,
+    neutral_llm: ChatOpenAI,
+) -> ShitstormState:
+    """Letzte supportive Kommentarrunde nach einer sehr guten Antwort.
+
+    Wird nur aufgerufen, wenn die Intensität bereits stark gesunken ist und der
+    Shitstorm im Prinzip gewonnen ist. Erzeugt eine klare, positive
+    Community-Reaktion auf die letzte Unternehmensantwort.
+    """
+    state["round"] += 1
+    round_num = state["round"]
+
+    platform = state["platform"]
+    company_name = state["company_name"]
+    cause = state["cause"]
+    intensity = float(state.get("intensity", 0.0))
+    last_answer = state.get("last_company_response", "")
+
+    is_x = isinstance(platform, str) and (
+        platform.lower().startswith("x") or "twitter" in platform.lower()
+    )
+
+    # Kurzer Auszug aus der History
+    recent_events: List[str] = []
+    for h in state.get("history", [])[-8:]:
+        actor = h.get("actor", "?")
+        content = str(h.get("content", ""))
+        if len(content) > 200:
+            content = content[:200] + "…"
+        recent_events.append(f"- {actor}: {content}")
+    recent_text = "\n".join(recent_events) if recent_events else "noch keine relevanten Einträge"
+
+    # Bisherige Community-Kommentare (für Anti-Duplikation)
+    previous_replies = [
+        str(h.get("content", "")).strip()
+        for h in state.get("history", [])
+        if h.get("actor") == "community"
+    ]
+    previous_replies_text = (
+        "\n".join(f"- {c}" for c in previous_replies[-25:])
+        if previous_replies
+        else "Keine bisherigen Community-Kommentare."
+    )
+
+    system_content = (
+        "Du simulierst die Kommentarspalte in einem Social-Media-Shitstorm NACH einer sehr guten Antwort des Unternehmens.\n"
+        "Schreibe auf Deutsch.\n"
+        "Die letzte Antwort und die geplanten Maßnahmen von {company_name} haben den Shitstorm praktisch beendet.\n"
+        "Die Kommentare sind überwiegend dankbar, erleichtert und konstruktiv.\n"
+        "Es gibt keine neuen Vorwürfe, keine zynischen Kommentare und keine Angriffe mehr.\n"
+        "Stattdessen bedanken sich die Leute ausdrücklich für die Klarstellung, Entschuldigung und die konkreten Schritte.\n"
+        "Du schreibst NUR Community-Kommentare, NIEMALS die Antwort des Unternehmens.\n"
+        "Antwort NUR als JSON-Liste von Strings, z.B. [\"Kommentar 1\", \"Kommentar 2\", \"...\"]\n"
+        "Kein zusätzlicher Text, keine Erklärungen, keine JSON-Objekte.\n"
+    ).format(company_name=company_name)
+
+    if is_x:
+        system_content += (
+            "\nSpezifisch für die Plattform X/Twitter:\n"
+            "- Du simulierst die Antworten direkt unter dem finalen Statement.\n"
+            "- Schreibe kurze, pointierte Kommentare (max. ca. 200 Zeichen).\n"
+            "- Kein Hashtag-Spam, maximal 0–2 Hashtags pro Kommentar.\n"
+        )
+
+    system_content += (
+        "\nZusatzregel:\n"
+        f"- Wenn in den Kommentaren über das Unternehmen gesprochen wird, verwende IMMER den exakten Namen „{company_name}“.\n"
+        "- Verwende KEINE allgemeinen Pronomen wie „ihr“, „euch“, „denen“, „die Firma“, „dieser Laden“ oder ähnliche Umschreibungen.\n"
+        f"- Formuliere Zustimmung, Dank und positive Erwartungen direkt mit dem Namen „{company_name}“.\n"
+    )
+
+    system_msg = SystemMessage(content=system_content)
+
+    human_msg = HumanMessage(
+        content=(
+            f"Plattform: {platform}\n"
+            f"Unternehmen: {company_name}\n"
+            f"Ursache des ursprünglichen Shitstorms: {cause}\n"
+            f"Aktuelle Shitstorm-Intensität (0-100): {intensity}\n"
+            f"Runde (Epilog): {round_num}\n\n"
+            "Die folgende Antwort des Unternehmens steht direkt über der Kommentarspalte, die du simulierst:\n"
+            f"Antwort des Unternehmens:\n\"\"\"{last_answer}\"\"\"\n\n"
+            "Relevante Ausschnitte aus dem bisherigen Verlauf:\n"
+            f"{recent_text}\n\n"
+            "Alle bisherigen Community-Kommentare (nicht wiederholen!):\n"
+            f"{previous_replies_text}\n\n"
+            "Generiere genau 6 kurze Kommentare der Community, die sich ausdrücklich für das Statement, "
+            f"die Klarstellung oder die konkreten Schritte von {company_name} bedanken oder sie als wichtigen "
+            "Schritt anerkennen. Die Kommentare blicken vorsichtig positiv in die Zukunft und drücken Erleichterung "
+            "oder Hoffnung aus. Formuliere KEINE neuen Vorwürfe und keine zynischen Untertöne.\n"
+            "Jeder Kommentar muss sich klar auf das obenstehende Statement beziehen.\n"
+            "Gib deine Antwort NUR als JSON-Liste von Strings zurück."
+        )
+    )
+
+    result = neutral_llm.invoke([system_msg, human_msg])
+    comments = _safe_load_json(result.content) or []
+
+    if not isinstance(comments, list) or not comments:
+        comments = [
+            f"Danke, {company_name} – so eine klare Stellungnahme hätte ich mir von Anfang an gewünscht.",
+            f"Ich finde es stark, wie {company_name} hier Verantwortung übernimmt und konkrete Schritte ankündigt.",
+        ]
+
+    normalized_existing = {c.strip() for c in previous_replies if c.strip()}
+    unique_round: List[str] = []
+    seen_round: set[str] = set()
+    for raw in comments:
+        c = str(raw).strip()
+        if not c:
+            continue
+        if c in normalized_existing or c in seen_round:
+            continue
+        seen_round.add(c)
+        unique_round.append(c)
+
+    if not unique_round:
+        unique_round = [
+            f"Für mich ist das Thema mit dieser Antwort erledigt – danke, {company_name}.",
+            f"Ich hoffe, dass {company_name} diese Linie beibehält. So fühlt sich das ernst gemeint an.",
+        ]
+
+    comment_tone = "supportive"
+    state["last_comment_tone"] = comment_tone
+
+    state["last_community_comments"] = unique_round
+    for c in unique_round:
+        entry: Dict[str, Any] = {
+            "actor": "community",
+            "round": round_num,
+            "content": c,
+            "tone": comment_tone,
+        }
+        if is_x:
+            entry["section"] = "x_replies"
+        state["history"].append(entry)
+
+    # Nach dem Epilog ist der Status endgültig "user_won"
+    state["status"] = "user_won"
+
+    return state
+
+
+# --------------------------------------------------------------------------- #
 # Human-in-the-loop Node für Unternehmensantwort
 # --------------------------------------------------------------------------- #
 
@@ -723,7 +871,13 @@ def llm_evaluate(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
 # --------------------------------------------------------------------------- #
 
 def update_intensity(state: ShitstormState) -> ShitstormState:
-    """Passt die Intensität anhand der Kriterien an und speichert Δ."""
+    """Passt die Intensität anhand der Kriterien an und speichert Δ.
+
+    Logik:
+    - >=80 % der Kriterien erfüllt -> Intensität stark runter, Sieg mit Epilog
+    - 60–79 % -> Intensität deutlich runter, weiter „running“
+    - <60 % -> Intensität +5 bis +20, ggf. Verlust
+    """
     prev = float(state.get("intensity", 50.0))
 
     criteria_total = int(state.get("criteria_total") or 0)
@@ -736,7 +890,7 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
         fulfilled_ratio = max(0.0, min(1.0, reaction_score / 100.0))
 
     if fulfilled_ratio >= 0.8:
-        # Sehr gute Antwort -> Shitstorm bricht faktisch ab
+        # Sehr gute Antwort -> Shitstorm bricht faktisch ab, Epilog-Runde folgt
         new_intensity = min(prev, 5.0)
         delta = new_intensity - prev
     elif fulfilled_ratio >= 0.6:
@@ -754,7 +908,8 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
 
     # Statuslogik (gute Reaktionen führen nie direkt zum „Verlust“)
     if new_intensity < 10.0:
-        state["status"] = "user_won"
+        # Sieg, aber noch Epilog-Kommentare generieren
+        state["status"] = "user_won_pending_epilogue"
     elif new_intensity > 90.0 and fulfilled_ratio < 0.6:
         state["status"] = "user_lost"
     else:
@@ -775,8 +930,13 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
 
 
 def route_after_update(state: ShitstormState) -> str:
-    """Routing: weiter simulieren oder beenden."""
-    return "continue" if state["status"] == "running" else "end"
+    """Routing: weiter simulieren, Epilog oder beenden."""
+    status = state.get("status")
+    if status == "running":
+        return "continue"
+    if status == "user_won_pending_epilogue":
+        return "epilogue"
+    return "end"
 
 
 # --------------------------------------------------------------------------- #
@@ -785,11 +945,13 @@ def route_after_update(state: ShitstormState) -> str:
 
 def summarize(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
     """Erzeugt eine textuelle Zusammenfassung des Verlaufs."""
-    outcome = {
+    outcome_map = {
         "user_won": "Der Shitstorm ist weitgehend abgeklungen.",
         "user_lost": "Der Shitstorm ist außer Kontrolle geraten.",
         "running": "Die Simulation wurde vorzeitig beendet.",
-    }[state["status"]]
+        "user_won_pending_epilogue": "Der Shitstorm ist weitgehend abgeklungen (Epilog-Kommentare aktiv).",
+    }
+    outcome = outcome_map.get(state["status"], "Die Simulation ist beendet.")
 
     history_lines: List[str] = []
     for h in state["history"]:
@@ -836,7 +998,7 @@ def summarize(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
 
 
 # --------------------------------------------------------------------------- #
-# Graph-Bau (Multi-Bot)
+# Graph-Bau (Multi-Bot mit Epilog)
 # --------------------------------------------------------------------------- #
 
 def build_graph():
@@ -849,6 +1011,9 @@ def build_graph():
     def community_node(state: ShitstormState) -> ShitstormState:
         return community_round(state, negative_llm=negative_llm, neutral_llm=neutral_llm)
 
+    def epilogue_node(state: ShitstormState) -> ShitstormState:
+        return epilogue_community_round(state, neutral_llm=neutral_llm)
+
     def evaluate_node(state: ShitstormState) -> ShitstormState:
         return llm_evaluate(state, eval_llm=eval_llm)
 
@@ -858,6 +1023,7 @@ def build_graph():
     workflow = StateGraph(ShitstormState)
 
     workflow.add_node("community_round", community_node)
+    workflow.add_node("epilogue_community", epilogue_node)
     workflow.add_node("company_response", company_response_node)
     workflow.add_node("evaluate", evaluate_node)
     workflow.add_node("update_intensity", update_intensity)
@@ -872,12 +1038,14 @@ def build_graph():
         route_after_update,
         {
             "continue": "community_round",
+            "epilogue": "epilogue_community",
             "end": "summarize",
         },
     )
+    workflow.add_edge("epilogue_community", "summarize")
     workflow.set_finish_point("summarize")
 
-    return workflow.compile(name="Shitstorm-Simulation (Multi-Bot)")
+    return workflow.compile(name="Shitstorm-Simulation (Multi-Bot mit Epilog)")
 
 
 # Diese Variable wird von LangGraph Server / LangGraph Cloud geladen
