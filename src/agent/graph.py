@@ -16,9 +16,10 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 # --------------------------------------------------------------------------- #
-# Global Settings / Constants
+# Globale Settings
 # --------------------------------------------------------------------------- #
 
+# Optional: LangSmith / LangChain Tracing deaktivieren
 os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
 os.environ.setdefault("LANGSMITH_TRACING", "false")
 
@@ -27,7 +28,10 @@ TIMEOUT_MARKER_PREFIX = "[AUTOMATISCHE COMMUNITY-REAKTION"
 
 
 class ShitstormState(TypedDict):
-    """Gesamter Zustand der Shitstorm-Simulation (JSON-serialisierbar)."""
+    """Gesamter Zustand der Shitstorm-Simulation.
+
+    Alle Keys müssen JSON-serialisierbar sein.
+    """
 
     platform: str
     cause: str
@@ -42,8 +46,9 @@ class ShitstormState(TypedDict):
     intensity: float
     status: Literal["running", "user_won", "user_lost"]
     summary: str
-    # optionale Runtime-Felder:
+    # Dynamisch genutzte Felder (werden zur Laufzeit ergänzt):
     # last_intensity_delta: float
+    # last_comment_tone: str
     # criteria_all_met: bool
     # criteria_missing: List[str]
     # criteria_fulfilled_count: int
@@ -55,45 +60,45 @@ class ShitstormState(TypedDict):
 # --------------------------------------------------------------------------- #
 
 def _safe_load_json(text: str):
-    """Versuche, robust JSON aus einem LLM-Output zu laden (mit Fallback)."""
+    """Versuche, robust JSON aus einem LLM-Output zu laden."""
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    # Versuch, ein JSON-Objekt bzw. eine -Liste im Text zu finden
-    for open_char, close_char in ("{}", "[]"):
-        start = text.find(open_char)
-        end = text.rfind(close_char)
-        if start != -1 and end != -1 and end > start:
-            candidate = text[start:end + 1]
-            try:
-                return json.loads(candidate)
-            except json.JSONDecodeError:
-                pass
+    # Objekt versuchen
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        cand = text[start:end + 1]
+        try:
+            return json.loads(cand)
+        except json.JSONDecodeError:
+            pass
+
+    # Liste versuchen
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        cand = text[start:end + 1]
+        try:
+            return json.loads(cand)
+        except json.JSONDecodeError:
+            pass
+
     return None
 
 
 def _make_llm(env_suffix: str, default_temp: float) -> ChatOpenAI:
-    """Erzeuge ein LLM, optional mit spezifischer Umgebungsvariable.
-
-    - NEGATIV-Bot:  OPENAI_MODEL_NEGATIVE
-    - NEUTRAL/Positiv-Bot: OPENAI_MODEL_NEUTRAL
-    - Bewertungs-Bot: OPENAI_MODEL_EVAL
-    Fallback ist immer OPENAI_MODEL (oder gpt-5.1).
-    """
+    """Erzeuge ein LLM mit optionalem Suffix (NEGATIVE/NEUTRAL/EVAL)."""
     model_name = os.getenv(f"OPENAI_MODEL_{env_suffix}") or os.getenv(
         "OPENAI_MODEL", "gpt-5.1"
     )
     return ChatOpenAI(model=model_name, temperature=default_temp)
 
 
-# --------------------------------------------------------------------------- #
-# Logik für Härtegrad / Situation / Timeout / Ziel-Post
-# --------------------------------------------------------------------------- #
-
 def _compute_severity(round_num: int, last_delta: float) -> str:
-    """Übersetze letzte Intensitätsänderung in Schweregrad-Label."""
+    """Grobe Klassifizierung, wie stark sich die Lage geändert hat."""
     if round_num == 1:
         return "initial"
     if last_delta <= -15:
@@ -108,7 +113,7 @@ def _compute_severity(round_num: int, last_delta: float) -> str:
 
 
 def _build_situation_description(round_num: int, last_delta: float) -> str:
-    """Textbeschreibung für die Community-Situation (für das LLM)."""
+    """Sprachliche Beschreibung der Lage für das LLM."""
     if round_num == 1:
         return (
             "Dies sind die ersten Reaktionen der Community auf den Auslöser. "
@@ -141,7 +146,7 @@ def _build_situation_description(round_num: int, last_delta: float) -> str:
 
 
 def _tone_config_for_severity(severity: str, company_name: str):
-    """Konfiguration für Ton & Kommentar-Mix je Schweregrad."""
+    """Baseline-Tonkonfiguration je nach Schweregrad."""
     if severity == "initial":
         return dict(
             positive_mode=False,
@@ -205,7 +210,6 @@ def _tone_config_for_severity(severity: str, company_name: str):
                 f"dass {company_name} zu wenig Verantwortung übernimmt oder zu vage bleibt."
             ),
         )
-    # strong_increase
     return dict(
         positive_mode=False,
         tone_instruction=(
@@ -220,7 +224,7 @@ def _tone_config_for_severity(severity: str, company_name: str):
 
 
 def _timeout_mode(state: ShitstormState) -> Literal["no_response", "after_response", "none"]:
-    """Erkenne, ob zuletzt ein Timeout-„Post“ stattgefunden hat."""
+    """Ermittelt, ob ein Timeout als letzte 'Antwort' im State steht."""
     company_events = [h for h in state.get("history", []) if h.get("actor") == "company"]
     if not company_events:
         return "none"
@@ -242,7 +246,7 @@ def _timeout_mode(state: ShitstormState) -> Literal["no_response", "after_respon
 
 
 def _target_post(state: ShitstormState, round_num: int, timeout_mode: str) -> Dict[str, str]:
-    """Bestimme, welcher Post direkt über den Kommentaren steht."""
+    """Bestimmt, auf welchen Post sich die Kommentare beziehen sollen."""
     cause = state["cause"]
     last_answer = state.get("last_company_response", "")
 
@@ -271,7 +275,6 @@ def _target_post(state: ShitstormState, round_num: int, timeout_mode: str) -> Di
             post_text=real_answer or last_answer or cause,
         )
 
-    # kein Timeout, normaler Verlauf
     if round_num == 1:
         return dict(
             post_type="Beschwerde-Post einer Nutzerin / eines Nutzers",
@@ -284,7 +287,7 @@ def _target_post(state: ShitstormState, round_num: int, timeout_mode: str) -> Di
 
 
 # --------------------------------------------------------------------------- #
-# Community-Runde – nutzt NEGATIVE- und NEUTRAL/positiv-Bot
+# Community-Runde – Multi-Bot-Kommentarerzeugung
 # --------------------------------------------------------------------------- #
 
 def community_round(
@@ -292,8 +295,13 @@ def community_round(
     negative_llm: ChatOpenAI,
     neutral_llm: ChatOpenAI,
 ) -> ShitstormState:
-    """Generiert Community-Kommentare für die aktuelle Runde (Multi-Bot)."""
+    """Erzeugt Community-Kommentare für die aktuelle Runde.
 
+    Multi-Bot-Logik:
+    - negative_llm: harsche / eskalierende Kommentare
+    - neutral_llm: neutrale bis unterstützende Kommentare
+    Auswahl abhängig von last_intensity_delta (Δ) und Runde.
+    """
     state["round"] += 1
     round_num = state["round"]
 
@@ -305,7 +313,6 @@ def community_round(
         state["intensity"] = 50.0
     intensity = float(state.get("intensity", prev_intensity))
 
-    # Δ-Intensität aus der letzten Runde
     last_delta = float(state.get("last_intensity_delta", 0.0))
 
     # X-UI?
@@ -316,16 +323,24 @@ def community_round(
     severity = _compute_severity(round_num, last_delta)
     situation_desc = _build_situation_description(round_num, last_delta)
     tone_cfg = _tone_config_for_severity(severity, company_name)
+
     positive_mode: bool = tone_cfg["positive_mode"]
     tone_instruction: str = tone_cfg["tone_instruction"]
     comment_mix_hint: str = tone_cfg["comment_mix_hint"]
+
+    # WICHTIG: ab Runde 2 steuert Δ das Vorzeichen des Kommentar-Tons
+    if round_num > 1:
+        if last_delta < 0:
+            positive_mode = True        # gute Reaktion -> supportive Kommentare
+        elif last_delta > 0:
+            positive_mode = False       # schlechte Reaktion -> harsche Kommentare
 
     t_mode = _timeout_mode(state)
     target = _target_post(state, round_num, t_mode)
     target_post_type = target["post_type"]
     target_post_text = target["post_text"]
 
-    # Kurzer Verlauf (für das LLM)
+    # Kurzer Auszug aus der History
     recent_events: List[str] = []
     for h in state.get("history", [])[-6:]:
         actor = h.get("actor", "?")
@@ -335,7 +350,7 @@ def community_round(
         recent_events.append(f"- {actor}: {content}")
     recent_text = "\n".join(recent_events) if recent_events else "noch keine relevanten Einträge"
 
-    # Bisherige Community-Kommentare (Anti-Duplikation)
+    # Bisherige Community-Kommentare (für Anti-Duplikation)
     previous_replies = [
         str(h.get("content", "")).strip()
         for h in state.get("history", [])
@@ -347,7 +362,7 @@ def community_round(
         else "Keine bisherigen Community-Kommentare."
     )
 
-    # Timeout-spezifische Zusatzinstruktionen
+    # Timeout-Spezifika
     if t_mode == "no_response":
         extra_timeout_instr = (
             "\nZusätzlicher Fokus: Das Unternehmen hat TROTZ Shitstorm noch nicht öffentlich reagiert.\n"
@@ -363,7 +378,7 @@ def community_round(
     else:
         extra_timeout_instr = ""
 
-    # Systemprompt (Basis)
+    # System-Prompt: negativer vs. unterstützender Kommentar-Bot
     if positive_mode:
         system_tone_header = (
             "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
@@ -377,7 +392,7 @@ def community_round(
             "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
             "Schreibe auf Deutsch.\n"
             "Der Ton kann kritisch, frustriert, verärgert und sehr hart sein. "
-            "Du darfst scharfe Kritik, Sarkasmus und sehr deutliche Formulierungen nutzen, "
+            "Du darfst harte Kritik, Sarkasmus und auch Beleidigungen gegen das Unternehmen verwenden, "
             "aber keine Gewaltaufrufe und keine diskriminierende oder hasserfüllte Sprache.\n"
         )
 
@@ -408,7 +423,7 @@ def community_round(
             "- Vermeide Hashtag-Spam, maximal 0–2 Hashtags pro Kommentar.\n"
         )
 
-    # Zusatzregel: Firmenname statt Pronomen
+    # Zusatzregel: immer Firmenname, keine Pronomen
     system_msg = SystemMessage(
         content=system_content
         + f"\nZusatzregel:\n"
@@ -417,7 +432,7 @@ def community_round(
           f"- Formuliere Kritik oder Zustimmung direkt mit dem Namen „{company_name}“.\n"
     )
 
-    # Emotionaler Fokus je Modus
+    # Emotionale Hinweise je nach Modus
     if positive_mode:
         emotional_hint = (
             "Generiere genau 6 kurze Kommentare der Community, die sich ausdrücklich für das Statement, "
@@ -431,7 +446,7 @@ def community_round(
             "Generiere genau 6 kurze Kommentare der Community, die – je nach Lage – kritisch bis stark ablehnend "
             f"gegenüber {company_name} sein können. Du darfst Frust, Enttäuschung und Wut ausdrücken, "
             "die Formulierungen können sehr hart und sarkastisch sein, "
-            "solange sie keine Gewaltaufrufe oder diskriminierende / hasserfüllte Sprache enthalten."
+            "solange sie keine Gewaltaufrufe oder diskriminierende/hasserfüllte Sprache enthalten."
         )
 
     human_msg = HumanMessage(
@@ -458,12 +473,11 @@ def community_round(
         )
     )
 
-    # Bot-Auswahl: negativ vs. neutral/positiv
+    # Multi-Bot-Auswahl: negativer vs. neutral/positiver LLM
     llm_to_use = neutral_llm if positive_mode else negative_llm
     result = llm_to_use.invoke([system_msg, human_msg])
     comments = _safe_load_json(result.content) or []
 
-    # Fallbacks
     if not isinstance(comments, list) or not comments:
         if positive_mode:
             comments = [
@@ -476,7 +490,7 @@ def community_round(
                 f"{company_name} sagt viel, beantwortet aber kaum eine der wichtigsten Fragen.",
             ]
 
-    # Harte Deduplikation gegen frühere und aktuelle Kommentare
+    # Harte Deduplication
     normalized_existing = {c.strip() for c in previous_replies if c.strip()}
     unique_round: List[str] = []
     seen_round: set[str] = set()
@@ -501,12 +515,23 @@ def community_round(
                 f"Für mich wirkt das alles noch nicht glaubwürdig, {company_name}.",
             ]
 
+    # Tonflag für diese Runde (für Frontend)
+    if last_delta < 0:
+        comment_tone = "supportive"
+    elif last_delta > 0:
+        comment_tone = "critical"
+    else:
+        comment_tone = "neutral"
+
+    state["last_comment_tone"] = comment_tone
+
     state["last_community_comments"] = unique_round
     for c in unique_round:
         entry: Dict[str, Any] = {
             "actor": "community",
             "round": round_num,
             "content": c,
+            "tone": comment_tone,
         }
         if is_x:
             entry["section"] = "x_replies"
@@ -520,7 +545,7 @@ def community_round(
 # --------------------------------------------------------------------------- #
 
 def company_response_node(state: ShitstormState) -> ShitstormState:
-    """Human-in-the-loop Node für die Unternehmensantwort (via interrupt)."""
+    """Unternehmensantwort via interrupt (Frontend liefert Text nach)."""
     prompt_payload: Dict[str, Any] = {
         "type": "company_response_request",
         "round": state["round"],
@@ -558,11 +583,11 @@ def company_response_node(state: ShitstormState) -> ShitstormState:
 
 
 # --------------------------------------------------------------------------- #
-# LLM-Evaluation – Bewertungs-Bot
+# Bewertungs-Bot (LLM-Evaluation)
 # --------------------------------------------------------------------------- #
 
 def llm_evaluate(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
-    """Bewertet die Unternehmensantwort anhand von 4 Kern-Kriterien."""
+    """Bewertet die Unternehmensantwort anhand der 4 Kern-Kriterien."""
     platform = state["platform"]
     cause = state["cause"]
     company_name = state["company_name"]
@@ -615,14 +640,14 @@ def llm_evaluate(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
     result = eval_llm.invoke([system_msg, human_msg])
     data = _safe_load_json(result.content) or {}
 
-    # overall-Score robust extrahieren
+    # overall robust extrahieren
     try:
         overall_raw = float(data.get("overall", 0.0))
     except (TypeError, ValueError):
         overall_raw = 0.0
     overall = max(0.0, min(100.0, overall_raw))
 
-    # Kriterien robust verarbeiten / fallbacken
+    # Kriterien robust verarbeiten
     raw_criteria = data.get("criteria")
     criteria: Dict[str, bool]
 
@@ -631,7 +656,7 @@ def llm_evaluate(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
         criteria_total = len(criteria)
         fulfilled_count = sum(1 for v in criteria.values() if v)
     else:
-        # Fallback: aus overall grob ableiten, wie viele Kriterien erfüllt sind
+        # Fallback aus overall
         criteria_total = 4
         if overall >= 80:
             fulfilled_count = 4
@@ -694,17 +719,16 @@ def llm_evaluate(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
 
 
 # --------------------------------------------------------------------------- #
-# Intensitäts-Update (nutzt Kriterien-Auswertung)
+# Intensitäts-Update
 # --------------------------------------------------------------------------- #
 
 def update_intensity(state: ShitstormState) -> ShitstormState:
-    """Aktualisiert die Shitstorm-Intensität basierend auf den Kriterien."""
+    """Passt die Intensität anhand der Kriterien an und speichert Δ."""
     prev = float(state.get("intensity", 50.0))
 
     criteria_total = int(state.get("criteria_total") or 0)
     fulfilled = int(state.get("criteria_fulfilled_count") or 0)
 
-    # Fallback: wenn irgendwas mit Kriterien schiefging, nutze reaction_score
     if criteria_total > 0:
         fulfilled_ratio = fulfilled / criteria_total
     else:
@@ -712,25 +736,23 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
         fulfilled_ratio = max(0.0, min(1.0, reaction_score / 100.0))
 
     if fulfilled_ratio >= 0.8:
-        # Sehr gute Antwort: Shitstorm bricht fast komplett ab
+        # Sehr gute Antwort -> Shitstorm bricht faktisch ab
         new_intensity = min(prev, 5.0)
         delta = new_intensity - prev
     elif fulfilled_ratio >= 0.6:
-        # Gute Antwort: Shitstorm legt sich deutlich, aber noch nicht komplett gelöst
+        # Gute Antwort -> deutliche Entspannung
         delta = -10.0
         new_intensity = max(0.0, prev + delta)
     else:
-        # Antwort ist nicht gut genug -> Shitstorm verschärft sich um 5–20 Punkte
+        # Schlechte Antwort -> Verschlechterung um 5–20 Punkte
         missing_ratio = 1.0 - fulfilled_ratio
-        # Skala: 5 .. 20 (max +20 Verschlechterung)
         delta = 5.0 + missing_ratio * 15.0
         new_intensity = max(0.0, min(100.0, prev + delta))
 
     state["intensity"] = new_intensity
-    # Δ für nächste Community-Runde speichern
     state["last_intensity_delta"] = float(delta)
 
-    # Status-Logik: bei „guten“ Reaktionen (>=60 %) niemals direkt verlieren
+    # Statuslogik (gute Reaktionen führen nie direkt zum „Verlust“)
     if new_intensity < 10.0:
         state["status"] = "user_won"
     elif new_intensity > 90.0 and fulfilled_ratio < 0.6:
@@ -753,16 +775,16 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
 
 
 def route_after_update(state: ShitstormState) -> str:
-    """Bestimmt, ob weiter simuliert oder beendet wird."""
+    """Routing: weiter simulieren oder beenden."""
     return "continue" if state["status"] == "running" else "end"
 
 
 # --------------------------------------------------------------------------- #
-# Zusammenfassung – nutzt Bewertungs-Bot (oder dasselbe LLM)
+# Zusammenfassung
 # --------------------------------------------------------------------------- #
 
 def summarize(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
-    """Erzeugt eine kurze Zusammenfassung des Verlaufs auf Basis der Kriterien."""
+    """Erzeugt eine textuelle Zusammenfassung des Verlaufs."""
     outcome = {
         "user_won": "Der Shitstorm ist weitgehend abgeklungen.",
         "user_lost": "Der Shitstorm ist außer Kontrolle geraten.",
@@ -814,16 +836,15 @@ def summarize(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
 
 
 # --------------------------------------------------------------------------- #
-# Graph-Bau – Multi-Bot Setup
+# Graph-Bau (Multi-Bot)
 # --------------------------------------------------------------------------- #
 
 def build_graph():
-    """Erzeugt den ausführbaren LangGraph-Workflow für die Simulation (Multi-Bot)."""
-
-    # Drei LLM-Instanzen (konfigurierbar über Umgebungsvariablen)
-    negative_llm = _make_llm("NEGATIVE", default_temp=0.4)
-    neutral_llm = _make_llm("NEUTRAL", default_temp=0.4)
-    eval_llm = _make_llm("EVAL", default_temp=0.0)
+    """Erzeugt den ausführbaren LangGraph-Workflow für die Simulation."""
+    # Drei LLM-Instanzen für die Multi-Bot-Logik:
+    negative_llm = _make_llm("NEGATIVE", default_temp=0.4)  # harsche Kommentare
+    neutral_llm = _make_llm("NEUTRAL", default_temp=0.4)    # neutrale/positive Kommentare
+    eval_llm = _make_llm("EVAL", default_temp=0.0)          # Bewertungs-Bot
 
     def community_node(state: ShitstormState) -> ShitstormState:
         return community_round(state, negative_llm=negative_llm, neutral_llm=neutral_llm)
