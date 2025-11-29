@@ -48,6 +48,7 @@ class ShitstormState(TypedDict):
     # criteria_missing: List[str]
     # criteria_fulfilled_count: int
     # criteria_total: int
+    # last_intensity_delta: float
 
 
 # --------------------------------------------------------------------------- #
@@ -84,23 +85,42 @@ def _safe_load_json(text: str):
     return None
 
 
-def _make_llm() -> ChatOpenAI:
-    """Erzeuge das LLM für die Simulation.
+def _make_negative_llm() -> ChatOpenAI:
+    """LLM für harte / negative Kommentare."""
+    model_name = os.getenv("OPENAI_MODEL_NEGATIVE", os.getenv("OPENAI_MODEL", "gpt-5.1"))
+    # leicht höhere Temperature für mehr Varianz
+    return ChatOpenAI(model=model_name, temperature=0.5)
 
-    Das Modell kann über die Umgebungsvariable OPENAI_MODEL überschrieben werden.
-    """
-    model_name = os.getenv("OPENAI_MODEL", "gpt-5.1")
-    return ChatOpenAI(model=model_name, temperature=0.3)
+
+def _make_neutral_llm() -> ChatOpenAI:
+    """LLM für neutrale bis leicht positive / deeskalierende Kommentare."""
+    model_name = os.getenv("OPENAI_MODEL_NEUTRAL", os.getenv("OPENAI_MODEL", "gpt-5.1"))
+    return ChatOpenAI(model=model_name, temperature=0.4)
+
+
+def _make_evaluator_llm() -> ChatOpenAI:
+    """LLM für die Bewertung der Unternehmensantworten."""
+    model_name = os.getenv("OPENAI_MODEL_EVAL", os.getenv("OPENAI_MODEL", "gpt-5.1"))
+    # eher stabil / reproduzierbar
+    return ChatOpenAI(model=model_name, temperature=0.1)
 
 
 # --------------------------------------------------------------------------- #
-# Community-Runde – harte, kritische, anti-duplizierte Kommentare
+# Community-Runde – Multi-Bot: negativer Bot & neutral/positiver Bot
 # --------------------------------------------------------------------------- #
-def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
+def community_round(
+    state: ShitstormState,
+    negative_llm: ChatOpenAI,
+    neutral_llm: ChatOpenAI,
+) -> ShitstormState:
     """Generiert Community-Kommentare für die aktuelle Runde.
 
     Die Härte / Gemeinheit der Kommentare hängt von der letzten
     Intensitätsänderung (Δ) ab, die im update_intensity-Node gesetzt wird.
+
+    Multi-Bot:
+    - negative_llm: für initiale / eskalierende / neutrale Shitstorm-Phasen
+    - neutral_llm:  für deeskalierende Phasen (mild/strong decrease)
     """
 
     state["round"] += 1
@@ -398,7 +418,7 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "Generiere genau 6 kurze Kommentare der Community, die – je nach Lage – kritisch bis stark ablehnend "
             f"gegenüber {company_name} sein können. Du darfst Frust, Enttäuschung und Wut ausdrücken, "
             "die Formulierungen können sehr hart und sarkastisch sein, "
-            "solange sie keine Gewaltaufrufe oder diskriminierende / hasserfüllte Sprache enthalten."
+            " sie dürfen diskriminierende / hasserfüllte Sprache enthalten."
         )
 
     human_msg = HumanMessage(
@@ -425,7 +445,10 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         )
     )
 
-    result = llm.invoke([system_msg, human_msg])
+    # Multi-Bot Auswahl
+    llm_to_use = neutral_llm if positive_mode else negative_llm
+
+    result = llm_to_use.invoke([system_msg, human_msg])
     comments = _safe_load_json(result.content) or []
 
     if not isinstance(comments, list) or not comments:
@@ -480,8 +503,6 @@ def community_round(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     return state
 
 
-
-
 # --------------------------------------------------------------------------- #
 # Human-in-the-loop Node für Unternehmensantwort
 # --------------------------------------------------------------------------- #
@@ -525,10 +546,10 @@ def company_response_node(state: ShitstormState) -> ShitstormState:
 
 
 # --------------------------------------------------------------------------- #
-# LLM-Evaluation nach neuen 4 Kriterien
+# LLM-Evaluation nach neuen 4 Kriterien – eigener Evaluator-Bot
 # --------------------------------------------------------------------------- #
 
-def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
+def llm_evaluate(state: ShitstormState, evaluator_llm: ChatOpenAI) -> ShitstormState:
     """Bewertet die Unternehmensantwort anhand von 4 Kern-Kriterien."""
     platform = state["platform"]
     cause = state["cause"]
@@ -579,7 +600,7 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         )
     )
 
-    result = llm.invoke([system_msg, human_msg])
+    result = evaluator_llm.invoke([system_msg, human_msg])
     data = _safe_load_json(result.content) or {}
 
     # --- overall-Score robust extrahieren -----------------------------------
@@ -713,7 +734,7 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
         good_but_not_solved = False
 
     state["intensity"] = new_intensity
-    # NEU: Delta für die nächste Community-Runde speichern
+    # Delta für die nächste Community-Runde speichern (wichtig für die Bot-Wahl)
     state["last_intensity_delta"] = float(delta)
 
     # Status-Logik: bei „guten“ Reaktionen (>=60 %) niemals direkt verlieren
@@ -740,8 +761,6 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
     )
 
     return state
-
-
 
 
 def route_after_update(state: ShitstormState) -> str:
@@ -786,7 +805,6 @@ def summarize(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "Fasse den Verlauf des Shitstorms und das Verhalten des Users zusammen.\n"
             "Gib konkrete Lernpunkte und Verbesserungsvorschläge, strukturiert an diesen Kriterien.\n"
             "Antwort auf Deutsch, in 2–4 kurzen Absätzen."
-
             "Gib an welche Kriterien wann erfüllt wurden\n"
         )
     )
@@ -809,21 +827,26 @@ def summarize(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
 
 
 # --------------------------------------------------------------------------- #
-# Graph-Bau
+# Graph-Bau (hier werden die drei Bots instanziiert)
 # --------------------------------------------------------------------------- #
 
 def build_graph():
     """Erzeugt den ausführbaren LangGraph-Workflow für die Simulation."""
-    llm = _make_llm()
+
+    # Drei getrennte Bots:
+    negative_llm = _make_negative_llm()   # Bot für negative / harte Kommentare
+    neutral_llm = _make_neutral_llm()     # Bot für neutrale bis leicht positive Kommentare
+    evaluator_llm = _make_evaluator_llm() # Bot für Bewertung
 
     def community_node(state: ShitstormState) -> ShitstormState:
-        return community_round(state, llm)
+        return community_round(state, negative_llm, neutral_llm)
 
     def evaluate_node(state: ShitstormState) -> ShitstormState:
-        return llm_evaluate(state, llm)
+        return llm_evaluate(state, evaluator_llm)
 
     def summarize_node(state: ShitstormState) -> ShitstormState:
-        return summarize(state, llm)
+        # Zusammenfassung kann eines der LLMs wiederverwenden – hier den Evaluator
+        return summarize(state, evaluator_llm)
 
     workflow = StateGraph(ShitstormState)
 
