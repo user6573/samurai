@@ -198,9 +198,7 @@ def _tone_config_for_severity(severity: str, company_name: str):
             comment_mix_hint=(
                 "Erzeuge überwiegend leicht positive, dankbare und zukunftsorientierte Kommentare. "
                 f"Die Leute bedanken sich explizit für das Statement bzw. die Klarstellung von {company_name}, "
-                "loben konkrete Schritte und blicken vorsichtig positiv in die Zukunft. "
-                "Formuliere keine neuen Vorwürfe und stelle nicht grundsätzlich infrage, "
-                f"ob {company_name} es ernst meint."
+                "loben konkrete Schritte und blicken vorsichtig positiv in die Zukunft."
             ),
         )
     if severity == "mild_decrease":
@@ -213,8 +211,7 @@ def _tone_config_for_severity(severity: str, company_name: str):
             comment_mix_hint=(
                 "Erzeuge überwiegend konstruktive Kommentare, die sich für die Klarstellung und erste Schritte "
                 f"von {company_name} bedanken. Einige Kommentare dürfen freundlich darauf hinweisen, "
-                "dass bestimmte Punkte weiter beobachtet werden sollten. "
-                "Grundstimmung: ‚Danke, guter Anfang, bitte dranbleiben.‘"
+                "dass bestimmte Punkte weiter beobachtet werden sollten."
             ),
         )
     if severity == "neutral":
@@ -224,8 +221,7 @@ def _tone_config_for_severity(severity: str, company_name: str):
                 "Die letzte Antwort hat kaum etwas verändert. Die Stimmung ist gemischt."
             ),
             comment_mix_hint=(
-                "Erzeuge eine Mischung aus nüchtern-kritischen, skeptischen und einigen neutralen Kommentaren. "
-                "Es gibt weder klare Entspannung noch massive Verschärfung."
+                "Erzeuge eine Mischung aus nüchtern-kritischen, skeptischen und einigen neutralen Kommentaren."
             ),
         )
     if severity == "mild_increase":
@@ -315,6 +311,41 @@ def _target_post(state: ShitstormState, round_num: int, timeout_mode: str) -> Di
     )
 
 
+def _compute_comment_mix(round_num: int, last_delta: float) -> tuple[int, int]:
+    """Berechnet (n_positive, n_negative) abhängig von Δ.
+
+    Regeln:
+    - Runde 1: immer 0 positive, 6 negative (klassischer Start-Shitstorm).
+    - Sehr starke Verbesserung (perfekte Nachricht, großer Δ nach unten):
+        -> 6 positive, 0 negative.
+    - Δ ≈ -10: 2 positive, 4 negative.
+    - Δ = 0: 1 positive, 5 negative.
+    - Δ > 0: 0 positive, 6 negative.
+    """
+    # Runde 1: Start-Shitstorm
+    if round_num == 1:
+        return 0, 6
+
+    # Sehr starke Verbesserung (perfekte Nachricht, z.B. -30, -60 usw.)
+    if last_delta <= -30:
+        return 6, 0
+
+    # Gute Verbesserung: -30 < Δ <= -15 -> 4 positive, 2 negative
+    if last_delta <= -15:
+        return 4, 2
+
+    # Spürbare, aber nicht perfekte Verbesserung: -15 < Δ < -5 -> 2 positive, 4 negative
+    if last_delta < -5:
+        return 2, 4
+
+    # Leichte Verbesserung oder gleich geblieben: -5 <= Δ <= 0 -> 1 positive, 5 negative
+    if last_delta <= 0:
+        return 1, 5
+
+    # Verschlechterung: Δ > 0 -> 0 positive, 6 negative
+    return 0, 6
+
+
 # --------------------------------------------------------------------------- #
 # Community-Runde – Multi-Bot-Kommentarerzeugung
 # --------------------------------------------------------------------------- #
@@ -329,7 +360,7 @@ def community_round(
     Multi-Bot-Logik:
     - negative_llm: harsche / eskalierende Kommentare
     - neutral_llm: neutrale bis unterstützende Kommentare
-    Auswahl abhängig von last_intensity_delta (Δ) und Runde.
+    Die genaue Mischung (positiv/negativ) hängt von last_intensity_delta (Δ) ab.
     """
     state["round"] += 1
     round_num = state["round"]
@@ -353,17 +384,24 @@ def community_round(
     situation_desc = _build_situation_description(round_num, last_delta)
     tone_cfg = _tone_config_for_severity(severity, company_name)
 
-    positive_mode: bool = tone_cfg["positive_mode"]
+    base_positive_mode: bool = tone_cfg["positive_mode"]
     tone_instruction: str = tone_cfg["tone_instruction"]
-    comment_mix_hint: str = tone_cfg["comment_mix_hint"]
+    comment_mix_hint_base: str = tone_cfg["comment_mix_hint"]
 
-    # WICHTIG: ab Runde 2 steuert Δ das Vorzeichen des Kommentar-Tons
-    if round_num > 1:
-        if last_delta < 0:
-            positive_mode = True        # gute Reaktion -> supportive Kommentare
-        elif last_delta > 0:
-            positive_mode = False       # schlechte Reaktion -> harsche Kommentare
+    # Kommentar-Mix anhand von Δ bestimmen
+    n_positive, n_negative = _compute_comment_mix(round_num, last_delta)
+    n_total = n_positive + n_negative
 
+    # Dominanter Ton (für Kopfzeile): positiv, wenn Mehrheit positiv
+    if n_positive > n_negative:
+        positive_mode = True
+    elif n_negative > n_positive:
+        positive_mode = False
+    else:
+        # Gleichstand -> Basis-Modus aus der Schwere
+        positive_mode = base_positive_mode
+
+    # Timeout-Analyse & Ziel-Post
     t_mode = _timeout_mode(state)
     target = _target_post(state, round_num, t_mode)
     target_post_type = target["post_type"]
@@ -396,20 +434,34 @@ def community_round(
         system_tone_header = (
             "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
             "Schreibe auf Deutsch.\n"
-            "In dieser Phase hat die letzte Antwort des Unternehmens viel zur Deeskalation beigetragen.\n"
-            "Die Kommentare sind überwiegend dankbar, erleichtert und konstruktiv. "
-            "Es gibt keine neuen Vorwürfe und keine grundsätzlichen Angriffe mehr.\n"
+            "Die letzte Antwort des Unternehmens hat bereits spürbar zur Deeskalation beigetragen.\n"
+            "Die Kommentare enthalten je nach Vorgabe einige dankbare, unterstützende Stimmen, "
+            "aber ggf. auch noch vereinzelt kritische oder skeptische Aussagen.\n"
         )
     else:
         system_tone_header = (
             "Du simulierst eine Kommentarspalte in einem Social-Media-Shitstorm.\n"
             "Schreibe auf Deutsch.\n"
-            "Der Ton ist sehr hart, wütend, frustriert und spöttisch. "
-            "Du darfst harte Kritik, Sarkasmus, zynische Kommentare und auch deutliche Beleidigungen "
+            "Der Ton ist mehrheitlich hart, wütend, frustriert und spöttisch. "
+            "Du darfst harte Kritik, Sarkasmus, zynische Kommentare und deutliche Beleidigungen "
             "gegen das Unternehmen und seine Entscheidungen verwenden.\n"
             "WICHTIG: Vermeide Gewaltaufrufe und verwende KEINE rassistische, sexistische oder sonst "
-            "diskriminierende Sprache gegen Gruppen. Die Kommentare sollen maximal unangenehm für das "
-            "Unternehmen sein, aber nicht gegen ganze Bevölkerungsgruppen hetzen.\n"
+            "diskriminierende Sprache gegen Gruppen.\n"
+        )
+
+    # Konkrete Mix-Beschreibung ins Prompt übernehmen
+    if n_positive == 6 and n_negative == 0:
+        comment_mix_hint = (
+            "Erzeuge ausschließlich unterstützende, dankbare Kommentare. "
+            f"Die Community ist spürbar erleichtert und lobt {company_name} für das Statement."
+        )
+    else:
+        comment_mix_hint = (
+            comment_mix_hint_base
+            + "\n"
+            f"Erzeuge insgesamt genau {n_total} Kommentare, davon {n_negative} klar kritische/negative "
+            f"und {n_positive} eher unterstützende/positive Kommentare. "
+            "Die Gesamtstimmung entspricht diesem Verhältnis."
         )
 
     system_content = (
@@ -469,17 +521,19 @@ def community_round(
 
     if positive_mode:
         emotional_hint = (
-            "Generiere genau 6 kurze Kommentare der Community, die sich ausdrücklich für das Statement, "
-            f"die Klarstellung oder die konkreten Schritte von {company_name} bedanken oder sie als wichtigen "
-            "Schritt anerkennen. Die Kommentare blicken vorsichtig positiv in die Zukunft und drücken Erleichterung "
-            "oder Hoffnung aus. Formuliere keine neuen Vorwürfe, "
-            "keine zynischen Untertöne und keine Andeutungen, dass ohnehin nichts passieren wird."
+            f"Generiere genau {n_total} kurze Kommentare der Community. "
+            f"Davon sollen {n_negative} Kommentare eher kritisch/skeptisch formuliert sein "
+            f"und {n_positive} Kommentare deutlich unterstützend und dankbar wirken. "
+            f"Die unterstützenden Kommentare bedanken sich ausdrücklich bei {company_name} für das Statement, "
+            "die Klarstellung oder die konkreten Schritte und blicken vorsichtig positiv in die Zukunft."
         )
     else:
         emotional_hint = (
-            "Generiere genau 6 kurze Kommentare der Community, die – je nach Lage – kritisch bis stark ablehnend "
-            f"gegenüber {company_name} sein können. Du darfst Frust, Enttäuschung und Wut ausdrücken, "
-            "die Formulierungen können sehr hart und sarkastisch sein, "
+            f"Generiere genau {n_total} kurze Kommentare der Community. "
+            f"Davon sollen {n_negative} Kommentare klar kritisch bis stark ablehnend "
+            f"gegenüber {company_name} sein und {n_positive} Kommentare dürfen vorsichtig anerkennen, "
+            "dass einzelne Punkte richtig oder hilfreich sind. "
+            "Die Formulierungen können sehr hart und sarkastisch sein, "
             "solange sie keine Gewaltaufrufe oder diskriminierende/hasserfüllte Sprache enthalten."
         )
 
@@ -513,7 +567,7 @@ def community_round(
     comments = _safe_load_json(result.content) or []
 
     if not isinstance(comments, list) or not comments:
-        if positive_mode:
+        if n_positive >= n_negative:
             comments = [
                 f"Ich bin ehrlich erleichtert – {company_name} klingt dieses Mal wirklich konkret.",
                 f"Respekt, {company_name}. So ein klares Statement hätte ich nicht erwartet.",
@@ -545,7 +599,7 @@ def community_round(
 
     # Fallback, falls wirklich alles wegdedupliziert wurde
     if not unique_round:
-        if positive_mode:
+        if n_positive >= n_negative:
             unique_round = [
                 f"Nochmals danke an {company_name} – das wirkt auf mich dieses Mal wirklich glaubwürdig.",
                 f"Für mich ist das ein wichtiger Schritt, {company_name}. Jetzt bitte konsequent dranbleiben.",
@@ -557,12 +611,12 @@ def community_round(
             ]
 
     # Tonflag für diese Runde (für Frontend)
-    if last_delta < 0:
+    if n_positive == n_total:
         comment_tone = "supportive"
-    elif last_delta > 0:
+    elif n_negative == n_total:
         comment_tone = "critical"
     else:
-        comment_tone = "neutral"
+        comment_tone = "mixed"
 
     state["last_comment_tone"] = comment_tone
 
