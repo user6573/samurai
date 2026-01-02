@@ -833,8 +833,8 @@ def company_response_node(state: ShitstormState) -> ShitstormState:
 # Bewertungs-Bot (LLM-Evaluation)
 # --------------------------------------------------------------------------- #
 
-def llm_evaluate(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
-    """Bewertet die Unternehmensantwort anhand der 4 Kern-Kriterien."""
+def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
+    """Bewertet die Unternehmensantwort anhand von 4 Kern-Kriterien + DM-Erkennung."""
     platform = state["platform"]
     cause = state["cause"]
     company_name = state["company_name"]
@@ -855,6 +855,9 @@ def llm_evaluate(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
             "  auch wenn kleinere Lücken oder Schwächen vorhanden sind.\n"
             "- Setze ein Kriterium nur dann auf false, wenn es klar nicht erkennbar erfüllt ist.\n"
             "- In Zweifelsfällen entscheide dich für true.\n\n"
+            "Zusätzlich sollst du erkennen, ob die Antwort erwähnt, dass eine DM / private Nachricht\n"
+            "geschickt oder angeboten wurde (z.B. 'wir melden uns per DM', 'schreib uns eine PN',\n"
+            "'wir klären das in den DMs', 'private Nachricht', 'Direct Message').\n"
             "Du antwortest ausschließlich als JSON-Objekt, ohne zusätzlichen Text."
         )
     )
@@ -869,41 +872,51 @@ def llm_evaluate(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
             "Bewerte, inwiefern die Antwort die vier Kriterien erfüllt.\n"
             "Gib deine Antwort NUR als gültiges JSON im folgenden Format zurück:\n"
             "{\n"
-            '  \"overall\": <Zahl 0-100>,\n'
-            '  \"criteria\": {\n'
-            '    \"authentisch\": true/false,\n'
-            '    \"professionell\": true/false,\n'
-            '    \"positiv_loesungsorientiert\": true/false,\n'
-            '    \"ganzheitlich_einheitlich\": true/false\n'
+            '  "overall": <Zahl 0-100>,\n'
+            '  "criteria": {\n'
+            '    "authentisch": true/false,\n'
+            '    "professionell": true/false,\n'
+            '    "positiv_loesungsorientiert": true/false,\n'
+            '    "ganzheitlich_einheitlich": true/false\n'
             "  },\n"
-            '  \"all_criteria_met\": true/false,\n'
-            '  \"missing_criteria\": [\"...\"],\n'
-            '  \"feedback\": \"Kurzes, konkretes Feedback dazu, welche Kriterien gut erfüllt sind '
-            "und welche noch verbessert werden sollten.\"\n"
+            '  "all_criteria_met": true/false,\n'
+            '  "missing_criteria": ["..."],\n'
+            '  "dm_hint": true/false,\n'
+            '  "dm_comment": "Kurze Einschätzung, ob und wie sinnvoll der Verweis auf '
+            'DM/private Nachricht ist.",\n'
+            '  "feedback": "Kurzes, konkretes Feedback dazu, welche Kriterien gut erfüllt sind '
+            'und welche noch verbessert werden sollten."\n'
             "}\n"
         )
     )
 
-    result = eval_llm.invoke([system_msg, human_msg])
+    result = llm.invoke([system_msg, human_msg])
     data = _safe_load_json(result.content) or {}
 
-    # overall robust extrahieren
+    # --- overall-Score robust extrahieren -----------------------------------
     try:
         overall_raw = float(data.get("overall", 0.0))
     except (TypeError, ValueError):
         overall_raw = 0.0
     overall = max(0.0, min(100.0, overall_raw))
 
-    # Kriterien robust verarbeiten
+    # --- Kriterien robust verarbeiten / fallbacken ---------------------------
     raw_criteria = data.get("criteria")
     criteria: Dict[str, bool]
 
     if isinstance(raw_criteria, dict) and raw_criteria:
+        # Modell hat die Struktur eingehalten
         criteria = {k: bool(v) for k, v in raw_criteria.items()}
         criteria_total = len(criteria)
         fulfilled_count = sum(1 for v in criteria.values() if v)
     else:
-        # Fallback aus overall
+        # Fallback: aus overall grob ableiten, wie viele Kriterien erfüllt sind
+        # 4 Kriterien -> Wir mappen:
+        #  - >= 80 -> 4 erfüllt
+        #  - 60–79 -> 3 erfüllt
+        #  - 40–59 -> 2 erfüllt
+        #  - 20–39 -> 1 erfüllt
+        #  - < 20  -> 0 erfüllt
         criteria_total = 4
         if overall >= 80:
             fulfilled_count = 4
@@ -922,8 +935,11 @@ def llm_evaluate(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
             "positiv_loesungsorientiert",
             "ganzheitlich_einheitlich",
         ]
-        criteria = {key: fulfilled_count > idx for idx, key in enumerate(keys)}
+        criteria = {}
+        for idx, key in enumerate(keys):
+            criteria[key] = fulfilled_count > idx  # 1. Kriterium als erstes "true" usw.
 
+    # Verhältnis & fehlende Kriterien
     if criteria_total > 0:
         fulfilled_ratio = fulfilled_count / criteria_total
     else:
@@ -932,8 +948,23 @@ def llm_evaluate(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
     missing_criteria = [k for k, v in criteria.items() if not v]
     all_criteria_met = criteria_total > 0 and fulfilled_count == criteria_total
 
+    # Wenn overall im JSON fehlt, aus Kriterien ableiten
     if overall == 0.0 and criteria_total > 0:
         overall = fulfilled_ratio * 100.0
+
+    # --- DM-Erkennung: Bewert-Bot-Flag + optionaler Bonus -------------------
+    dm_hint_model = data.get("dm_hint", None)
+    dm_comment = data.get("dm_comment") or ""
+    dm_bonus_points = 0.0
+
+    if isinstance(dm_hint_model, bool) and dm_hint_model:
+        dm_detected = True
+    else:
+        dm_detected = False
+
+    if dm_detected:
+        dm_bonus_points = 5.0
+        overall = min(100.0, overall + dm_bonus_points)
 
     feedback = data.get("feedback") or "Keine detaillierte Rückmeldung verfügbar."
 
@@ -942,27 +973,39 @@ def llm_evaluate(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
     state["responsibility_score"] = overall
     state["reaction_score"] = overall
 
-    # Interne Kriterien-Daten
+    # Interne Kriterien-Daten (inkl. DM-Bonus)
     state["criteria_all_met"] = all_criteria_met
     state["criteria_missing"] = missing_criteria
     state["criteria_fulfilled_count"] = fulfilled_count
     state["criteria_total"] = criteria_total
+    state["dm_bonus_points"] = dm_bonus_points
+    state["dm_hint_model"] = bool(dm_hint_model) if isinstance(dm_hint_model, bool) else None
 
     missing_text = ", ".join(missing_criteria) if missing_criteria else "keine (alle erfüllt)"
+    bonus_text = " (inkl. +5 Punkte DM-Bonus)" if dm_bonus_points > 0 else ""
+
+    # History-Eintrag etwas ausführlicher, inkl. DM-Info
+    history_parts: List[str] = [
+        f"Kriterien erfüllt: {fulfilled_count}/{criteria_total}{bonus_text}.",
+        f"Fehlende Kriterien: {missing_text}.",
+    ]
+    if dm_detected:
+        if dm_comment:
+            history_parts.append(f"DM-Einschätzung: {dm_comment}")
+        else:
+            history_parts.append("DM-Hinweis erkannt: Das Unternehmen verweist auf DM/private Nachricht.")
+    history_parts.append(f"Feedback: {feedback}")
 
     state["history"].append(
         {
             "actor": "coach",
             "round": state["round"],
-            "content": (
-                f"Kriterien erfüllt: {fulfilled_count}/{criteria_total}. "
-                f"Fehlende Kriterien: {missing_text}. "
-                f"Feedback: {feedback}"
-            ),
+            "content": " ".join(history_parts),
         }
     )
 
     return state
+
 
 
 # --------------------------------------------------------------------------- #
