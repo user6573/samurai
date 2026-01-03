@@ -1082,26 +1082,54 @@ def route_after_update(state: ShitstormState) -> str:
 # Zusammenfassung
 # --------------------------------------------------------------------------- #
 
-def summarize(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
-    """Erzeugt eine textuelle Zusammenfassung des Verlaufs."""
-    outcome_map = {
+def summarize(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
+    """Erzeugt eine kurze Zusammenfassung des Verlaufs auf Basis der Kriterien
+    und geht ausdrücklich auf DM-Privatisierung ein, falls sie vorkam.
+    """
+    outcome = {
         "user_won": "Der Shitstorm ist weitgehend abgeklungen.",
         "user_lost": "Der Shitstorm ist außer Kontrolle geraten.",
         "running": "Die Simulation wurde vorzeitig beendet.",
-        "user_won_pending_epilogue": "Der Shitstorm ist weitgehend abgeklungen (Epilog-Kommentare aktiv).",
-    }
-    outcome = outcome_map.get(state["status"], "Die Simulation ist beendet.")
+        "user_won_pending_epilogue": "Der Shitstorm ist faktisch gelöst, es folgt eine Abschlussbewertung.",
+    }.get(state.get("status", "running"), "Die Simulation wurde vorzeitig beendet.")
 
+    # Verlaufstext bauen
     history_lines: List[str] = []
-    for h in state["history"]:
+    for h in state.get("history", []):
         actor = h.get("actor", "?")
         rnd = h.get("round", 0)
-        content = h.get("content", "")
+        content = str(h.get("content", ""))
         if len(content) > 400:
             content = content[:400] + " [...]"
         history_lines.append(f"Runde {rnd} - {actor}: {content}")
 
     history_text = "\n".join(history_lines[-60:])
+
+    # DM-Privatisierung aus History ableiten
+    dm_rounds: List[int] = []
+    for h in state.get("history", []):
+        if h.get("actor") == "coach":
+            txt = str(h.get("content", ""))
+            if "DM-Privatisierung: True" in txt:
+                dm_rounds.append(int(h.get("round", 0)))
+
+    dm_used = bool(dm_rounds) or bool(state.get("dm_privatisierung", False))
+
+    if dm_used:
+        if dm_rounds:
+            rounds_str = ", ".join(str(r) for r in sorted(set(dm_rounds)))
+            dm_info = (
+                "Es gab Versuche, Teile der Kommunikation in Direktnachrichten/privat zu verlagern "
+                f"(insbesondere in Runde(n): {rounds_str})."
+            )
+        else:
+            dm_info = (
+                "Es gab Versuche, Teile der Kommunikation in Direktnachrichten/privat zu verlagern."
+            )
+    else:
+        dm_info = (
+            "Es gab keine nennenswerten Versuche, das Thema überwiegend in Direktnachrichten/privat zu verschieben."
+        )
 
     system_msg = SystemMessage(
         content=(
@@ -1110,12 +1138,13 @@ def summarize(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
             "- authentisch\n"
             "- professionell\n"
             "- positiv & lösungsorientiert\n"
-            "- ganzheitlich & einheitlich\n"
-            "- zeitnah\n\n"
+            "- ganzheitlich & einheitlich\n\n"
+            "Berücksichtige außerdem explizit den Umgang mit Transparenz und Kanalwahl:\n"
+            "- Wurde versucht, die Diskussion oder Lösung in Direktnachrichten / private Kanäle zu verlagern?\n"
+            "- Welche Wirkung hat das auf Vertrauen, Glaubwürdigkeit und Deeskalation?\n\n"
             "Fasse den Verlauf des Shitstorms und das Verhalten des Users zusammen.\n"
             "Gib konkrete Lernpunkte und Verbesserungsvorschläge, strukturiert an diesen Kriterien.\n"
-            "Antwort auf Deutsch, in 2–4 kurzen Absätzen.\n"
-            "Gehe auch kurz darauf ein, in welchen Runden welche Kriterien besonders gut oder schlecht erfüllt wurden."
+            "Antwort auf Deutsch, in 2–4 kurzen Absätzen und erwähne ausdrücklich auch den Umgang mit DMs."
         )
     )
 
@@ -1126,14 +1155,18 @@ def summarize(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
             f"Endgültige Shitstorm-Intensität: {state['intensity']:.1f} / 100\n"
             f"Ergebnis: {outcome}\n\n"
             "Ausschnitte aus dem Verlauf:\n"
-            f"{history_text}"
+            f"{history_text}\n\n"
+            f"Hinweis zum Umgang mit Direktnachrichten (DMs): {dm_info}\n"
+            "Gib bitte eine zusammenhängende Auswertung, in der du auch kurz kommentierst,\n"
+            "ob der Einsatz von DMs kommunikativ sinnvoll war oder eher Vertrauen gekostet hat."
         )
     )
 
-    result = eval_llm.invoke([system_msg, human_msg])
+    result = llm.invoke([system_msg, human_msg])
     summary = result.content.strip()
     state["summary"] = summary
     return state
+
 
 
 # --------------------------------------------------------------------------- #
