@@ -1082,7 +1082,7 @@ def route_after_update(state: ShitstormState) -> str:
 # Zusammenfassung
 # --------------------------------------------------------------------------- #
 
-def summarize(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
+def summarize(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
     """Erzeugt eine kurze Zusammenfassung des Verlaufs auf Basis der Kriterien
     und geht ausdrücklich auf DM-Privatisierung ein, falls sie vorkam.
     """
@@ -1162,7 +1162,7 @@ def summarize(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
         )
     )
 
-    result = llm.invoke([system_msg, human_msg])
+    result = eval_llm.invoke([system_msg, human_msg])
     summary = result.content.strip()
     state["summary"] = summary
     return state
