@@ -833,8 +833,10 @@ def company_response_node(state: ShitstormState) -> ShitstormState:
 # Bewertungs-Bot (LLM-Evaluation)
 # --------------------------------------------------------------------------- #
 
-def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
-    """Bewertet die Unternehmensantwort anhand von 4 Kern-Kriterien + DM-Erkennung."""
+def llm_evaluate(state: ShitstormState, eval_llm: ChatOpenAI) -> ShitstormState:
+    """Bewertet die Unternehmensantwort anhand der 4 Kern-Kriterien
+    und prüft zusätzlich, ob das Thema in DMs/privat ausgelagert wird.
+    """
     platform = state["platform"]
     cause = state["cause"]
     company_name = state["company_name"]
@@ -855,9 +857,15 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "  auch wenn kleinere Lücken oder Schwächen vorhanden sind.\n"
             "- Setze ein Kriterium nur dann auf false, wenn es klar nicht erkennbar erfüllt ist.\n"
             "- In Zweifelsfällen entscheide dich für true.\n\n"
-            "Zusätzlich sollst du erkennen, ob die Antwort erwähnt, dass eine DM / private Nachricht\n"
-            "geschickt oder angeboten wurde (z.B. 'wir melden uns per DM', 'schreib uns eine PN',\n"
-            "'wir klären das in den DMs', 'private Nachricht', 'Direct Message').\n"
+            "ZUSÄTZLICH sollst du prüfen, ob die Antwort nahelegt, dass das eigentliche Problem\n"
+            "in Direktnachrichten / privat gelöst werden soll (z.B. Formulierungen wie\n"
+            "'schreib uns eine DM', 'wir klären das per Direktnachricht', 'melde dich privat',\n"
+            "'wir schreiben dir eine DM', 'wir klären das im Privatchat').\n"
+            "- Wenn das Thema überwiegend oder vollständig in DMs verlagert werden soll,\n"
+            "  ist das kommunikativ problematisch. In diesem Fall setze ein eigenes Feld\n"
+            '  \"dm_privatisierung\" auf true.\n'
+            "- Wenn DMs nur zusätzlich zu einer transparenten öffentlichen Antwort erwähnt werden,\n"
+            '  kannst du \"dm_privatisierung\" auf false lassen.\n\n'
             "Du antwortest ausschließlich als JSON-Objekt, ohne zusätzlichen Text."
         )
     )
@@ -872,25 +880,23 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "Bewerte, inwiefern die Antwort die vier Kriterien erfüllt.\n"
             "Gib deine Antwort NUR als gültiges JSON im folgenden Format zurück:\n"
             "{\n"
-            '  "overall": <Zahl 0-100>,\n'
-            '  "criteria": {\n'
-            '    "authentisch": true/false,\n'
-            '    "professionell": true/false,\n'
-            '    "positiv_loesungsorientiert": true/false,\n'
-            '    "ganzheitlich_einheitlich": true/false\n'
+            '  \"overall\": <Zahl 0-100>,\n'
+            '  \"criteria\": {\n'
+            '    \"authentisch\": true/false,\n'
+            '    \"professionell\": true/false,\n'
+            '    \"positiv_loesungsorientiert\": true/false,\n'
+            '    \"ganzheitlich_einheitlich\": true/false\n'
             "  },\n"
-            '  "all_criteria_met": true/false,\n'
-            '  "missing_criteria": ["..."],\n'
-            '  "dm_hint": true/false,\n'
-            '  "dm_comment": "Kurze Einschätzung, ob und wie sinnvoll der Verweis auf '
-            'DM/private Nachricht ist.",\n'
-            '  "feedback": "Kurzes, konkretes Feedback dazu, welche Kriterien gut erfüllt sind '
-            'und welche noch verbessert werden sollten."\n'
+            '  \"all_criteria_met\": true/false,\n'
+            '  \"missing_criteria\": [\"...\"],\n'
+            '  \"dm_privatisierung\": true/false,\n'
+            '  \"feedback\": \"Kurzes, konkretes Feedback dazu, welche Kriterien gut erfüllt sind '
+            "und welche noch verbessert werden sollten.\"\n"
             "}\n"
         )
     )
 
-    result = llm.invoke([system_msg, human_msg])
+    result = eval_llm.invoke([system_msg, human_msg])
     data = _safe_load_json(result.content) or {}
 
     # --- overall-Score robust extrahieren -----------------------------------
@@ -905,18 +911,11 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     criteria: Dict[str, bool]
 
     if isinstance(raw_criteria, dict) and raw_criteria:
-        # Modell hat die Struktur eingehalten
         criteria = {k: bool(v) for k, v in raw_criteria.items()}
         criteria_total = len(criteria)
         fulfilled_count = sum(1 for v in criteria.values() if v)
     else:
-        # Fallback: aus overall grob ableiten, wie viele Kriterien erfüllt sind
-        # 4 Kriterien -> Wir mappen:
-        #  - >= 80 -> 4 erfüllt
-        #  - 60–79 -> 3 erfüllt
-        #  - 40–59 -> 2 erfüllt
-        #  - 20–39 -> 1 erfüllt
-        #  - < 20  -> 0 erfüllt
+        # Fallback: aus overall grob ableiten
         criteria_total = 4
         if overall >= 80:
             fulfilled_count = 4
@@ -935,11 +934,8 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
             "positiv_loesungsorientiert",
             "ganzheitlich_einheitlich",
         ]
-        criteria = {}
-        for idx, key in enumerate(keys):
-            criteria[key] = fulfilled_count > idx  # 1. Kriterium als erstes "true" usw.
+        criteria = {key: fulfilled_count > idx for idx, key in enumerate(keys)}
 
-    # Verhältnis & fehlende Kriterien
     if criteria_total > 0:
         fulfilled_ratio = fulfilled_count / criteria_total
     else:
@@ -948,23 +944,25 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     missing_criteria = [k for k, v in criteria.items() if not v]
     all_criteria_met = criteria_total > 0 and fulfilled_count == criteria_total
 
-    # Wenn overall im JSON fehlt, aus Kriterien ableiten
     if overall == 0.0 and criteria_total > 0:
         overall = fulfilled_ratio * 100.0
 
-    # --- DM-Erkennung: Bewert-Bot-Flag + optionaler Bonus -------------------
-    dm_hint_model = data.get("dm_hint", None)
-    dm_comment = data.get("dm_comment") or ""
-    dm_bonus_points = 0.0
+    # --- DM-Privatisierung prüfen -------------------------------------------
+    dm_priv = data.get("dm_privatisierung", None)
 
-    if isinstance(dm_hint_model, bool) and dm_hint_model:
-        dm_detected = True
-    else:
-        dm_detected = False
+    # Fallback, falls das Modell das Feld nicht liefert: einfache Heuristik
+    if dm_priv is None:
+        answer_lower = answer.lower()
+        dm_keywords = [
+            " dm ", "per dm", "direct message", "direktnachricht",
+            "privatnachricht", "schreib uns privat", "schreibe uns privat",
+            "melde dich privat", "im privatchat", "privat klären",
+            "schreib uns eine dm", "wir schreiben dir eine dm",
+        ]
+        dm_priv = any(kw in answer_lower for kw in dm_keywords)
 
-    if dm_detected:
-        dm_bonus_points = 5.0
-        overall = min(100.0, overall + dm_bonus_points)
+    dm_priv = bool(dm_priv)
+    state["dm_privatisierung"] = dm_priv
 
     feedback = data.get("feedback") or "Keine detaillierte Rückmeldung verfügbar."
 
@@ -973,34 +971,24 @@ def llm_evaluate(state: ShitstormState, llm: ChatOpenAI) -> ShitstormState:
     state["responsibility_score"] = overall
     state["reaction_score"] = overall
 
-    # Interne Kriterien-Daten (inkl. DM-Bonus)
+    # Interne Kriterien-Daten
     state["criteria_all_met"] = all_criteria_met
     state["criteria_missing"] = missing_criteria
     state["criteria_fulfilled_count"] = fulfilled_count
     state["criteria_total"] = criteria_total
-    state["dm_bonus_points"] = dm_bonus_points
-    state["dm_hint_model"] = bool(dm_hint_model) if isinstance(dm_hint_model, bool) else None
 
     missing_text = ", ".join(missing_criteria) if missing_criteria else "keine (alle erfüllt)"
-    bonus_text = " (inkl. +5 Punkte DM-Bonus)" if dm_bonus_points > 0 else ""
-
-    # History-Eintrag etwas ausführlicher, inkl. DM-Info
-    history_parts: List[str] = [
-        f"Kriterien erfüllt: {fulfilled_count}/{criteria_total}{bonus_text}.",
-        f"Fehlende Kriterien: {missing_text}.",
-    ]
-    if dm_detected:
-        if dm_comment:
-            history_parts.append(f"DM-Einschätzung: {dm_comment}")
-        else:
-            history_parts.append("DM-Hinweis erkannt: Das Unternehmen verweist auf DM/private Nachricht.")
-    history_parts.append(f"Feedback: {feedback}")
 
     state["history"].append(
         {
             "actor": "coach",
             "round": state["round"],
-            "content": " ".join(history_parts),
+            "content": (
+                f"Kriterien erfüllt: {fulfilled_count}/{criteria_total}. "
+                f"Fehlende Kriterien: {missing_text}. "
+                f"DM-Privatisierung: {dm_priv}. "
+                f"Feedback: {feedback}"
+            ),
         }
     )
 
@@ -1018,7 +1006,9 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
     Logik:
     - >=80 % der Kriterien erfüllt -> Intensität stark runter, Sieg mit Epilog
     - 60–79 % -> Intensität deutlich runter, weiter „running“
-    - <60 % -> Intensität +5 bis +20, ggf. Verlust
+    - <60 % -> Intensität +5 bis +20
+    - Wenn die Antwort das Thema in DMs/privat verlagert (dm_privatisierung=True),
+      wird zusätzlich ein Malus von +5 Punkten auf die Intensität aufgeschlagen.
     """
     prev = float(state.get("intensity", 50.0))
 
@@ -1031,26 +1021,32 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
         reaction_score = float(state.get("reaction_score", 50.0))
         fulfilled_ratio = max(0.0, min(1.0, reaction_score / 100.0))
 
+    # --- Basis-Delta aus den Kriterien --------------------------------------
     if fulfilled_ratio >= 0.8:
-        # Sehr gute Antwort -> Shitstorm bricht faktisch ab, Epilog-Runde folgt
-        new_intensity = min(prev, 5.0)
-        delta = new_intensity - prev
+        # Sehr gute Antwort -> Shitstorm bricht fast komplett ab
+        base_new_intensity = min(prev, 5.0)
     elif fulfilled_ratio >= 0.6:
         # Gute Antwort -> deutliche Entspannung
-        delta = -10.0
-        new_intensity = max(0.0, prev + delta)
+        base_new_intensity = max(0.0, prev - 10.0)
     else:
         # Schlechte Antwort -> Verschlechterung um 5–20 Punkte
         missing_ratio = 1.0 - fulfilled_ratio
-        delta = 5.0 + missing_ratio * 15.0
-        new_intensity = max(0.0, min(100.0, prev + delta))
+        worsen = 5.0 + missing_ratio * 15.0
+        base_new_intensity = max(0.0, min(100.0, prev + worsen))
+
+    # --- DM-Malus (+5 Punkte) ----------------------------------------------
+    dm_priv = bool(state.get("dm_privatisierung"))
+    new_intensity = base_new_intensity
+    if dm_priv:
+        new_intensity = max(0.0, min(100.0, new_intensity + 5.0))
+
+    delta = new_intensity - prev
 
     state["intensity"] = new_intensity
     state["last_intensity_delta"] = float(delta)
 
     # Statuslogik (gute Reaktionen führen nie direkt zum „Verlust“)
     if new_intensity < 10.0:
-        # Sieg, aber noch Epilog-Kommentare generieren
         state["status"] = "user_won_pending_epilogue"
     elif new_intensity > 90.0 and fulfilled_ratio < 0.6:
         state["status"] = "user_lost"
@@ -1063,7 +1059,8 @@ def update_intensity(state: ShitstormState) -> ShitstormState:
             "round": state["round"],
             "content": (
                 f"Intensität von {prev:.1f} auf {new_intensity:.1f} geändert "
-                f"(Δ={delta:+.1f}, Verhältnis erfüllter Kriterien={fulfilled_ratio:.2f})."
+                f"(Δ={delta:+.1f}, Verhältnis erfüllter Kriterien={fulfilled_ratio:.2f}, "
+                f"DM-Privatisierung={dm_priv})."
             ),
         }
     )
